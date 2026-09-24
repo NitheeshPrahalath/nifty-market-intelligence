@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nifty-market-intelligence"
+version = "0.1.0"
+description = "Nifty Market Intelligence & Stock Analysis Platform (data ingestion & validation layer)"
+requires-python = ">=3.11"
+dependencies = [
+    "sqlalchemy>=2.0.30,<3",
+    "alembic>=1.13,<2",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+    "pandas>=2.2,<3",
+    "numpy>=1.26,<3",
+    "tenacity>=8.3,<9",
+    "typer>=0.12,<1",
+    "psycopg2-binary>=2.9,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "pytest-cov>=5,<6",
+    "ruff>=0.6,<1",
+    "yfinance>=0.2.40,<1",
+]
+
+[project.scripts]
+nmi = "nmi.ingestion.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.coverage.run]
+source = ["nmi"]

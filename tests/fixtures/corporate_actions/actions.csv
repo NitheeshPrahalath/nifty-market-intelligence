@@ -1,0 +1,3 @@
+symbol,action_type,ex_date,ratio_numerator,ratio_denominator,dividend_amount,description,exchange
+RELIANCE,SPLIT,2024-06-17,2,1,,split 2:1,NSE
+TCS,DIVIDEND,2024-06-21,,,9,interim dividend,NSE
