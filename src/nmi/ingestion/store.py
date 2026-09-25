@@ -8,7 +8,7 @@ source. Index membership uses interval semantics (closing superseded intervals).
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, timedelta
 
 from sqlalchemy import select
@@ -32,11 +32,17 @@ from nmi.core.models import (
     Instrument,
     MarketRegime,
     MomentumMetric,
+    Recommendation,
+    RecommendationState,
+    RecommendationVersion,
     RelativeStrengthMetric,
     ScoringSnapshot,
     Sector,
     SectorMetric,
+    Signal,
+    Strategy,
     StrategyParameter,
+    StrategyVersion,
     TechnicalIndicator,
     ValuationMetric,
 )
@@ -78,7 +84,11 @@ def _bulk_upsert(
         for k in rows[0].keys()
         if k not in (index_elements or []) and k not in (exclude_from_update or set())
     }
-    stmt = stmt.on_conflict_do_update(index_elements=index_elements, set_=set_)
+    if set_:
+        stmt = stmt.on_conflict_do_update(index_elements=index_elements, set_=set_)
+    else:
+        # Nothing may be rewritten (e.g. immutable version rows): keep existing.
+        stmt = stmt.on_conflict_do_nothing(index_elements=index_elements)
     session.execute(stmt)
 
 
@@ -635,3 +645,142 @@ def get_strategy_weights(session: Session, parameter_set: str = "default") -> di
         select(StrategyParameter).where(StrategyParameter.parameter_set == parameter_set)
     ).all()
     return {row.name: float(row.value) for row in rows if row.value is not None}
+
+
+# ---------------------------------------------------------------------------
+# Strategies, signals and recommendations (Phase 4)
+# ---------------------------------------------------------------------------
+
+def upsert_strategies(session: Session, rows: Iterable[Mapping]) -> int:
+    """Seed/refresh strategy identities by ``code`` (idempotent)."""
+    rows = [{k: _clean_value(v) for k, v in row.items()} for row in rows]
+    if not rows:
+        return 0
+    _bulk_upsert(
+        session,
+        Strategy.__table__,
+        rows,
+        index_elements=["code"],
+        exclude_from_update={"description"},
+    )
+    session.flush()
+    return len(rows)
+
+
+def upsert_strategy_versions(
+    session: Session, strategy_id: int, versions: Iterable[Mapping]
+) -> int:
+    """Insert immutable rule versions; existing versions are never rewritten."""
+    rows = [
+        {
+            **{"strategy_id": strategy_id},
+            **{k: _clean_value(v) for k, v in version.items()},
+        }
+        for version in versions
+    ]
+    if not rows:
+        return 0
+    _bulk_upsert(
+        session,
+        StrategyVersion.__table__,
+        rows,
+        index_elements=["strategy_id", "version"],
+        exclude_from_update={"engine_version", "rules", "notes", "is_current"},
+    )
+    session.flush()
+    return len(rows)
+
+
+def get_strategy_by_code(session: Session, code: str) -> Strategy | None:
+    return session.scalar(select(Strategy).where(Strategy.code == code))
+
+
+def get_strategy_version(
+    session: Session, strategy_id: int, version: int
+) -> StrategyVersion | None:
+    return session.scalar(
+        select(StrategyVersion).where(
+            StrategyVersion.strategy_id == strategy_id,
+            StrategyVersion.version == version,
+        )
+    )
+
+
+def get_current_strategy_version(session: Session, strategy_id: int) -> StrategyVersion | None:
+    return session.scalar(
+        select(StrategyVersion).where(
+            StrategyVersion.strategy_id == strategy_id,
+            StrategyVersion.is_current.is_(True),
+        )
+    )
+
+
+def get_active_strategy_versions(session: Session) -> list[tuple[Strategy, StrategyVersion]]:
+    """Every active strategy paired with its current rule version."""
+    stmt = (
+        select(Strategy, StrategyVersion)
+        .join(StrategyVersion, StrategyVersion.strategy_id == Strategy.id)
+        .where(Strategy.is_active.is_(True), StrategyVersion.is_current.is_(True))
+        .order_by(Strategy.code)
+    )
+    return list(session.execute(stmt).all())
+
+
+def upsert_signals(session: Session, rows: Iterable[Mapping]) -> int:
+    rows = [{k: _clean_value(v) for k, v in row.items()} for row in rows]
+    if not rows:
+        return 0
+    _bulk_upsert(
+        session,
+        Signal.__table__,
+        rows,
+        index_elements=["instrument_id", "strategy_version_id", "as_of", "calc_version"],
+    )
+    session.flush()
+    return len(rows)
+
+
+def get_signals_on(
+    session: Session, as_of: date, strategy_version_ids: Sequence[int] | None = None
+) -> list[Signal]:
+    stmt = select(Signal).where(Signal.as_of == as_of)
+    if strategy_version_ids is not None:
+        stmt = stmt.where(Signal.strategy_version_id.in_(list(strategy_version_ids)))
+    return list(
+        session.scalars(
+            stmt.order_by(Signal.instrument_id, Signal.strategy_version_id)
+        ).all()
+    )
+
+
+def open_recommendation(
+    session: Session, instrument_id: int, strategy_id: int
+) -> Recommendation | None:
+    """The live recommendation for an instrument-strategy pair, if any."""
+    return session.scalar(
+        select(Recommendation)
+        .where(
+            Recommendation.instrument_id == instrument_id,
+            Recommendation.strategy_version_id == strategy_id,
+            Recommendation.state != RecommendationState.CLOSED,
+        )
+        .order_by(Recommendation.id.desc())
+    )
+
+
+def insert_recommendation(session: Session, **columns) -> Recommendation:
+    recommendation = Recommendation(**columns)
+    session.add(recommendation)
+    session.flush()
+    return recommendation
+
+
+def insert_recommendation_version(
+    session: Session, recommendation_id: int, version: int, columns: Mapping
+) -> RecommendationVersion:
+    row = RecommendationVersion(
+        **{**{"recommendation_id": recommendation_id, "version": version}, **columns}
+    )
+    session.add(row)
+    session.flush()
+    return row

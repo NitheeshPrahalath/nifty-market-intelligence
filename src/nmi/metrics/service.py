@@ -1,4 +1,4 @@
-"""Metrics engine (Phase 2) + analysis engines (Phase 3) — service layer.
+"""Metrics engine (Phase 2) + analysis engines (Phase 3) + strategies (Phase 4).
 
 Orchestrates bulk runs with the same audit/traceability conventions as the
 ingestion layer: every job writes an ``ingestion_runs`` row and per-instrument
@@ -14,9 +14,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from nmi.analysis.common import as_float
 from nmi.analysis.horizon import compute_horizon_metrics
 from nmi.analysis.regime import compute_market_regime, index_return
 from nmi.analysis.scoring import DEFAULT_WEIGHTS, compute_scoring
@@ -39,9 +40,15 @@ from nmi.core.models import (
     IngestionError,
     IngestionRun,
     Instrument,
+    MarketRegime,
     MomentumMetric,
+    RecommendationState,
     RelativeStrengthMetric,
+    ScoringSnapshot,
     SectorMetric,
+    Signal,
+    Strategy,
+    StrategyVersion,
     TechnicalIndicator,
     ValuationMetric,
 )
@@ -52,11 +59,20 @@ from nmi.indicators.valuation import compute_valuation_metrics
 from nmi.ingestion import store
 from nmi.ingestion.backfill import resolve_members
 from nmi.ingestion.providers.base import index_price_provider
+from nmi.strategies import (
+    ENGINE_VERSION,
+    StrategyContext,
+    StrategyMeta,
+    catalog_payloads,
+    evaluate_strategy,
+)
+from nmi.strategies.rules import StrategyRules
 
 _TECHNICAL_FIELDS = (
     "sma20",
     "sma50",
     "sma200",
+    "atr14",
     "rsi14",
     "macd_hist",
     "adx14",
@@ -68,6 +84,8 @@ _TECHNICAL_FIELDS = (
     "dist_from_low_52w_pct",
     "volume_ratio",
     "trend_state",
+    "breakout_52w",
+    "high_52w",
 )
 _MOMENTUM_FIELDS = ("return_1m", "return_3m", "return_6m", "return_12m")
 _RS_FIELDS = ("rs_1m", "rs_3m", "rs_6m", "rs_12m", "rs_trend")
@@ -927,6 +945,329 @@ class MetricsService:
                 return index_id
         return None
 
+    # -------------------------------------------------- strategies (Phase 4)
+    def seed_strategies(self) -> int:
+        """Persist the default strategy catalog; a changed rule document
+        becomes a new immutable strategy version. Returns versions created."""
+        stored = 0
+        for payload in catalog_payloads():
+            store.upsert_strategies(self.session, [payload["strategy"]])
+            strategy = store.get_strategy_by_code(self.session, payload["strategy"]["code"])
+            if strategy is None:
+                continue
+            current = store.get_current_strategy_version(self.session, strategy.id)
+            if current is not None and current.rules == payload["rules"]:
+                continue
+            latest = self.session.scalar(
+                select(func.max(StrategyVersion.version)).where(
+                    StrategyVersion.strategy_id == strategy.id
+                )
+            )
+            if current is not None:
+                current.is_current = False
+            store.upsert_strategy_versions(
+                self.session,
+                strategy.id,
+                [
+                    {
+                        "version": (latest or 0) + 1,
+                        "engine_version": ENGINE_VERSION,
+                        "rules": payload["rules"],
+                        "notes": "seeded from nmi.strategies.catalog",
+                        "is_current": True,
+                    }
+                ],
+            )
+            stored += 1
+        self.session.flush()
+        return stored
+
+    def _active_strategies(
+        self,
+    ) -> list[tuple[Strategy, StrategyVersion, StrategyRules]]:
+        active = store.get_active_strategy_versions(self.session)
+        if not active:
+            self.seed_strategies()
+            self.session.flush()
+            active = store.get_active_strategy_versions(self.session)
+        return [
+            (strategy, version, StrategyRules.from_dict(version.rules))
+            for strategy, version in active
+        ]
+
+    def _scoring_map(self, inputs: _AnalysisInputs) -> dict[tuple[int, date], dict]:
+        if not inputs.company_by_instrument:
+            return {}
+        stmt = select(ScoringSnapshot).where(
+            ScoringSnapshot.instrument_id.in_(list(inputs.company_by_instrument)),
+            ScoringSnapshot.as_of >= inputs.start,
+            ScoringSnapshot.as_of <= inputs.end,
+            ScoringSnapshot.calc_version == self.calc_version,
+        )
+        fields = (
+            "composite_score",
+            "score_label",
+            "preferred_horizon",
+            "trend_score",
+            "momentum_score",
+            "relative_strength_score",
+            "quality_score",
+            "growth_score",
+            "valuation_score",
+            "risk_score",
+            "liquidity_score",
+            "horizon_score",
+            "sector_score",
+        )
+        return {
+            (row.instrument_id, row.as_of): _row_dict(row, fields)
+            for row in self.session.scalars(stmt).all()
+        }
+
+    def _regime_map(self, start: date, end: date) -> dict[tuple[int, date], dict]:
+        stmt = select(MarketRegime).where(
+            MarketRegime.as_of >= start,
+            MarketRegime.as_of <= end,
+            MarketRegime.calc_version == self.calc_version,
+        )
+        return {
+            (row.index_id, row.as_of): _row_dict(row, ("regime_score", "regime_label"))
+            for row in self.session.scalars(stmt).all()
+        }
+
+    def _sector_state_map(
+        self, index_codes: Sequence[str], start: date, end: date
+    ) -> dict[tuple[int, object, date], str]:
+        stmt = select(SectorMetric).where(
+            SectorMetric.as_of >= start, SectorMetric.as_of <= end
+        )
+        if not index_codes:
+            return {}
+        return {
+            (row.index_id, row.sector_id, row.as_of): row.sector_state.value
+            for row in self.session.scalars(stmt).all()
+        }
+
+    def _signal_context(
+        self,
+        inputs: _AnalysisInputs,
+        instrument_id: int,
+        as_of: date,
+        scoring: dict | None,
+        regime: dict | None,
+        sector: dict | None,
+    ) -> StrategyContext | None:
+        technical = inputs.technical_at(instrument_id, as_of)
+        if technical is None:
+            return None
+        values: dict = {k: v for k, v in technical.items() if k != "as_of"}
+        values.update(inputs.momentum.get((instrument_id, as_of)) or {})
+        values.update(inputs.rs.get((instrument_id, as_of)) or {})
+        values.update(inputs.valuation.get((instrument_id, as_of)) or {})
+        company_id = inputs.company_by_instrument.get(instrument_id)
+        if company_id is not None:
+            values.update(inputs.fundamentals_at(company_id, as_of))
+        if scoring:
+            values.update(scoring)
+        if regime:
+            values.update(regime)
+        if sector:
+            values.update(sector)
+        close = as_float(technical.get("close"))
+        sma20 = as_float(technical.get("sma20"))
+        if close is not None and sma20:
+            values["dist_from_sma20_pct"] = (close / sma20 - 1) * 100
+        return StrategyContext(
+            instrument_id=instrument_id,
+            as_of=as_of,
+            values=values,
+            close=close,
+            atr14=as_float(technical.get("atr14")),
+        )
+
+    def compute_signals(
+        self, index_codes: Sequence[str], start: date | None = None, end: date | None = None
+    ) -> JobResult:
+        """Evaluate every active strategy version for every member-day."""
+        run = self._start_run(
+            "compute_signals",
+            {"index_codes": list(index_codes), "calc_version": self.calc_version},
+        )
+        result = JobResult(run_id=run.id, job_name="compute_signals", status=RunStatus.RUNNING)
+        try:
+            strategies = self._active_strategies()
+            if not strategies:
+                self.session.commit()
+                self._finish_run(run, result)
+                return result
+
+            inputs = self._analysis_inputs(index_codes, start, end)
+            scoring_rows = self._scoring_map(inputs)
+            regime_rows = self._regime_map(inputs.start, inputs.end)
+            sector_states = self._sector_state_map(index_codes, inputs.start, inputs.end)
+
+            for instrument_id in sorted(_member_instrument_ids(inputs.intervals)):
+                try:
+                    rows: list[dict] = []
+                    for as_of in inputs.as_of_dates():
+                        index_id = self._primary_index(instrument_id, as_of, index_codes, inputs)
+                        sector_id = inputs.sector_by_instrument.get(instrument_id)
+                        sector_state = sector_states.get((index_id, sector_id, as_of))
+                        ctx = self._signal_context(
+                            inputs,
+                            instrument_id,
+                            as_of,
+                            scoring_rows.get((instrument_id, as_of)),
+                            regime_rows.get((index_id, as_of)) if index_id is not None else None,
+                            {"sector_state": sector_state} if sector_state else None,
+                        )
+                        if ctx is None:
+                            continue
+                        for strategy, version, rules in strategies:
+                            meta = StrategyMeta(
+                                code=strategy.code,
+                                name=strategy.name,
+                                horizon=getattr(strategy.horizon, "value", strategy.horizon),
+                                version=version.version,
+                            )
+                            decision = evaluate_strategy(meta, rules, ctx)
+                            rows.append(
+                                {
+                                    "instrument_id": instrument_id,
+                                    "strategy_version_id": version.id,
+                                    "as_of": as_of,
+                                    "calc_version": self.calc_version,
+                                    **decision.as_signal_columns(),
+                                }
+                            )
+                    stored = store.upsert_signals(self.session, rows)
+                    result.items_processed += stored
+                    result.per_symbol.append({"instrument_id": instrument_id, "stored": stored})
+                except Exception as exc:  # noqa: BLE001
+                    result.items_failed += 1
+                    self._record_error(
+                        run.id,
+                        "signals",
+                        Severity.ERROR,
+                        "COMPUTE_FAILED",
+                        f"instrument {instrument_id}: {type(exc).__name__}: {exc}",
+                        instrument_id=instrument_id,
+                    )
+                    self.session.rollback()
+            self.session.commit()
+            self._finish_run(run, result)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            self.session.rollback()
+            self._fail_run(run, result, exc)
+            raise
+
+    def generate_recommendations(
+        self, index_codes: Sequence[str], as_of: date | None = None
+    ) -> JobResult:
+        """Turn qualifying signals into tracked recommendations.
+
+        A recommendation is created once per instrument-strategy pair; the
+        original is never overwritten — Phase 5 appends new versions to
+        ``recommendation_versions`` as the thesis evolves.
+        """
+        run = self._start_run("generate_recommendations", {"as_of": str(as_of) if as_of else None})
+        result = JobResult(
+            run_id=run.id, job_name="generate_recommendations", status=RunStatus.RUNNING
+        )
+        try:
+            strategies = self._active_strategies()
+            if not strategies:
+                self.session.commit()
+                self._finish_run(run, result)
+                return result
+            if as_of is None:
+                as_of = self.session.scalar(
+                    select(func.max(Signal.as_of)).where(Signal.calc_version == self.calc_version)
+                )
+            if as_of is None:
+                self.session.commit()
+                self._finish_run(run, result)
+                return result
+
+            by_version = {version.id: (strategy, version) for strategy, version, _r in strategies}
+            signals = store.get_signals_on(
+                self.session, as_of, [version.id for _s, version, _r in strategies]
+            )
+            for signal in signals:
+                pair = by_version.get(signal.strategy_version_id)
+                if pair is None:
+                    continue
+                strategy, _version = pair
+                if signal.state not in (
+                    RecommendationState.WATCH,
+                    RecommendationState.POTENTIAL_ENTRY,
+                    RecommendationState.ENTRY,
+                ):
+                    continue
+                if store.open_recommendation(self.session, signal.instrument_id, strategy.id):
+                    continue
+                recommendation = store.insert_recommendation(
+                    self.session,
+                    instrument_id=signal.instrument_id,
+                    strategy_version_id=signal.strategy_version_id,
+                    strategy_code=strategy.code,
+                    state=signal.state,
+                    horizon=signal.horizon,
+                    confidence=signal.confidence,
+                    current_price=signal.price,
+                    entry_low=signal.entry_low,
+                    entry_high=signal.entry_high,
+                    target_low=signal.target_low,
+                    target_high=signal.target_high,
+                    invalidation_price=signal.invalidation_price,
+                    risk_level=signal.risk_level,
+                    expected_holding_days_min=signal.expected_holding_days_min,
+                    expected_holding_days_max=signal.expected_holding_days_max,
+                    thesis=signal.thesis,
+                    created_reason=" | ".join(signal.reasons),
+                    latest_version=1,
+                    first_as_of=as_of,
+                    last_as_of=as_of,
+                )
+                store.insert_recommendation_version(
+                    self.session,
+                    recommendation.id,
+                    1,
+                    {
+                        "as_of": as_of,
+                        "state": signal.state.value,
+                        "signal_type": signal.signal_type.value,
+                        "price": signal.price,
+                        "confidence": signal.confidence,
+                        "composite_score": signal.composite_score,
+                        "risk_level": signal.risk_level.value,
+                        "entry_low": signal.entry_low,
+                        "entry_high": signal.entry_high,
+                        "target_low": signal.target_low,
+                        "target_high": signal.target_high,
+                        "invalidation_price": signal.invalidation_price,
+                        "rules_result": signal.rules_result,
+                        "reasons": signal.reasons,
+                        "change_summary": "Initial recommendation",
+                    },
+                )
+                result.items_processed += 1
+                result.per_symbol.append(
+                    {
+                        "instrument_id": signal.instrument_id,
+                        "strategy": strategy.code,
+                        "state": signal.state.value,
+                    }
+                )
+            self.session.commit()
+            self._finish_run(run, result)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            self.session.rollback()
+            self._fail_run(run, result, exc)
+            raise
+
     # --------------------------------------------------------------- combined
     def compute_eod(
         self, index_codes: Sequence[str], start: date | None = None, end: date | None = None
@@ -934,7 +1275,8 @@ class MetricsService:
         """Full EOD refresh in dependency order.
 
         Phase 2 (fundamentals, technical, momentum, valuation) feeds Phase 3
-        (sector aggregates, market regime, horizon, scoring).
+        (sector aggregates, market regime, horizon, scoring), which in turn
+        feeds Phase 4 (per-strategy signals and tracked recommendations).
         """
         return [
             self.compute_fundamentals(index_codes),
@@ -945,6 +1287,8 @@ class MetricsService:
             self.compute_regime(index_codes, start, end),
             self.compute_horizon(index_codes, start, end),
             self.compute_scoring(index_codes, start, end),
+            self.compute_signals(index_codes, start, end),
+            self.generate_recommendations(index_codes),
         ]
 
     # ---------------------------------------------------------------- audit

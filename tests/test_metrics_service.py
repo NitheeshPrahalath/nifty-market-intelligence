@@ -15,10 +15,15 @@ from nmi.core.models import (
     Instrument,
     MarketRegime,
     MomentumMetric,
+    Recommendation,
+    RecommendationVersion,
     RelativeStrengthMetric,
     ScoringSnapshot,
     SectorMetric,
+    Signal,
+    Strategy,
     StrategyParameter,
+    StrategyVersion,
     TechnicalIndicator,
     ValuationMetric,
 )
@@ -133,7 +138,7 @@ def test_compute_eod_chains_and_rerun_is_idempotent(sqlite_session, pointed_at_l
     msvc.backfill_index_prices(["NIFTY_50"])
 
     results = msvc.compute_eod(["NIFTY_50"], START, END)
-    assert len(results) == 8
+    assert len(results) == 10
     assert all(r.status == RunStatus.SUCCEEDED for r in results)
     assert all(r.items_failed == 0 for r in results)
 
@@ -144,9 +149,12 @@ def test_compute_eod_chains_and_rerun_is_idempotent(sqlite_session, pointed_at_l
     regime_before = _count(sqlite_session, MarketRegime)
     horizon_before = _count(sqlite_session, HorizonMetric)
     scoring_before = _count(sqlite_session, ScoringSnapshot)
+    signal_before = _count(sqlite_session, Signal)
+    rec_before = _count(sqlite_session, Recommendation)
     assert tech_before > 0 and mom_before > 0 and val_before > 0
     assert sector_before > 0 and regime_before > 0
     assert horizon_before > 0 and scoring_before > 0
+    assert signal_before > 0
 
     rerun = msvc.compute_eod(["NIFTY_50"], START, END)
     assert all(r.status == RunStatus.SUCCEEDED for r in rerun)
@@ -157,6 +165,11 @@ def test_compute_eod_chains_and_rerun_is_idempotent(sqlite_session, pointed_at_l
     assert _count(sqlite_session, MarketRegime) == regime_before
     assert _count(sqlite_session, HorizonMetric) == horizon_before
     assert _count(sqlite_session, ScoringSnapshot) == scoring_before
+    assert _count(sqlite_session, Signal) == signal_before
+    assert _count(sqlite_session, Recommendation) == rec_before
+    assert _count(sqlite_session, RecommendationVersion) == _count(
+        sqlite_session, Recommendation
+    )  # one initial version per live recommendation, never rewritten
 
     runs = sqlite_session.scalars(select(IngestionRun)).all()
     assert all(r.status == RunStatus.SUCCEEDED for r in runs)
@@ -246,3 +259,180 @@ def test_scoring_weights_come_from_strategy_parameters(sqlite_session, pointed_a
     assert float(rows[-1].composite_score) == pytest.approx(
         float(rows[-1].momentum_score), abs=1e-4
     )
+
+
+def test_phase4_strategies_and_signals(sqlite_session, pointed_at_long_fixtures):
+    _seed_backtest(session=sqlite_session)
+    msvc = MetricsService(sqlite_session)
+    msvc.backfill_index_prices(["NIFTY_50"])
+
+    assert msvc.seed_strategies() == 3
+    assert msvc.seed_strategies() == 0  # idempotent: same rules, no new versions
+    strategies = sqlite_session.scalars(select(Strategy).order_by(Strategy.code)).all()
+    assert [s.code for s in strategies] == [
+        "lt_quality_value",
+        "mt_momentum_quality",
+        "st_breakout_momentum",
+    ]
+    assert all(s.is_active for s in strategies)
+    versions = sqlite_session.scalars(select(StrategyVersion)).all()
+    assert len(versions) == 3
+    assert all(v.version == 1 and v.is_current for v in versions)
+    assert {v.engine_version for v in versions} == {"v1"}
+    assert all("entry" in v.rules and "risk" in v.rules for v in versions)
+
+    msvc.compute_eod(["NIFTY_50"], START, END)
+
+    sessions = _sessions(START, END)
+    assert _count(sqlite_session, Signal) == 3 * sessions * 3
+    latest = sqlite_session.scalars(
+        select(Signal).where(Signal.as_of == END).order_by(Signal.id)
+    ).all()
+    assert len(latest) == 9  # 3 instruments x 3 strategies
+    for signal in latest:
+        assert signal.calc_version == "v1"
+        assert signal.signal_type in {
+            "BUY_SETUP", "WATCH", "HOLD", "REDUCE", "EXIT_WARNING", "EXIT"
+        }
+        assert signal.state in {
+            "WATCH", "POTENTIAL_ENTRY", "ENTRY", "HOLD",
+            "THESIS_WEAKENING", "EXIT_REVIEW", "EXIT", "CLOSED",
+        }
+        assert signal.horizon in {"SHORT_TERM", "MEDIUM_TERM", "LONG_TERM"}
+        assert signal.risk_level in {"LOW", "MODERATE", "HIGH", "VERY_HIGH"}
+        assert signal.thesis
+        assert signal.reasons
+        assert signal.expected_holding_days_min < signal.expected_holding_days_max
+        if signal.entry_low is not None and signal.entry_high is not None:
+            assert signal.entry_low <= signal.entry_high
+            if signal.invalidation_price is not None:
+                assert signal.invalidation_price < signal.entry_low
+            if signal.target_low is not None:
+                assert signal.target_low > signal.entry_high
+        groups = {group["name"] for group in signal.rules_result}
+        assert "entry" in groups
+    assert all(s.as_of >= START and s.as_of <= END for s in sqlite_session.scalars(select(Signal)))
+
+    # Context really flows into the rules: the strategy that demands a 52-week
+    # breakout only fires on breakout days.
+    breakout = sqlite_session.scalars(
+        select(Signal).join(StrategyVersion, StrategyVersion.id == Signal.strategy_version_id)
+        .join(Strategy, Strategy.id == StrategyVersion.strategy_id)
+        .where(Strategy.code == "st_breakout_momentum")
+    ).all()
+    assert breakout
+    for signal in breakout:
+        entry = next(g for g in signal.rules_result if g["name"] == "entry")
+        breakout_condition = next(c for c in entry["conditions"] if c["key"] == "breakout_52w")
+        assert (breakout_condition["status"] == "pass") == (signal.signal_type == "BUY_SETUP")
+
+    # Re-running the EOD chain updates signals in place, never duplicates them.
+    before = _count(sqlite_session, Signal)
+    msvc.compute_eod(["NIFTY_50"], START, END)
+    assert _count(sqlite_session, Signal) == before
+
+
+def test_recommendations_are_created_once_with_an_initial_version(
+    sqlite_session, pointed_at_long_fixtures
+):
+    _seed_backtest(session=sqlite_session)
+    msvc = MetricsService(sqlite_session)
+    msvc.backfill_index_prices(["NIFTY_50"])
+    msvc.compute_eod(["NIFTY_50"], START, END)
+
+    # A deliberately lenient strategy so the latest day always qualifies.
+    store.upsert_strategies(
+        sqlite_session,
+        [
+            {
+                "code": "always_entry",
+                "name": "Test always-entry",
+                "description": "Composite score at any level",
+                "horizon": "MEDIUM_TERM",
+                "is_active": True,
+            }
+        ],
+    )
+    strategy = store.get_strategy_by_code(sqlite_session, "always_entry")
+    store.upsert_strategy_versions(
+        sqlite_session,
+        strategy.id,
+        [
+            {
+                "version": 1,
+                "engine_version": "v1",
+                "rules": {
+                    "entry": {
+                        "conditions": [
+                            {
+                                "key": "composite_score",
+                                "op": ">=",
+                                "value": 0.0,
+                                "label": "Composite score",
+                            }
+                        ],
+                        "mode": "all",
+                    },
+                    "risk": {
+                        "entry_low_atr": 0.25,
+                        "entry_high_atr": 0.0,
+                        "stop_atr": 2.0,
+                        "target_r": 2.0,
+                        "holding_days_min": 30,
+                        "holding_days_max": 120,
+                    },
+                },
+                "notes": None,
+                "is_current": True,
+            }
+        ],
+    )
+    sqlite_session.commit()
+    assert msvc.seed_strategies() == 0  # catalog seeding leaves the custom strategy alone
+
+    signals_result = msvc.compute_signals(["NIFTY_50"], START, END)
+    assert signals_result.items_failed == 0
+    rec_result = msvc.generate_recommendations(["NIFTY_50"], END)
+    assert rec_result.status == RunStatus.SUCCEEDED
+
+    recs = sqlite_session.scalars(
+        select(Recommendation).where(Recommendation.strategy_code == "always_entry")
+    ).all()
+    assert len(recs) == 3  # one per instrument, not per day
+    for rec in recs:
+        assert rec.state == "ENTRY"
+        assert rec.horizon == "MEDIUM_TERM"
+        assert rec.first_as_of == END
+        assert rec.last_as_of == END
+        assert rec.latest_version == 1
+        assert rec.current_price is not None
+        assert rec.entry_low <= rec.entry_high
+        assert rec.invalidation_price < rec.entry_low
+        assert rec.target_low > rec.entry_high
+        assert rec.thesis
+        assert rec.created_reason
+        assert rec.expected_holding_days_min == 30
+        assert rec.expected_holding_days_max == 120
+
+    versions = sqlite_session.scalars(
+        select(RecommendationVersion).where(
+            RecommendationVersion.recommendation_id.in_([r.id for r in recs])
+        )
+    ).all()
+    assert len(versions) == 3
+    for version in versions:
+        rec = next(r for r in recs if r.id == version.recommendation_id)
+        assert version.version == 1
+        assert version.as_of == END
+        assert version.state == rec.state
+        assert version.price == rec.current_price
+        assert version.change_summary == "Initial recommendation"
+        assert version.rules_result
+
+    # A second pass must not duplicate or rewrite the live recommendations.
+    again = msvc.generate_recommendations(["NIFTY_50"], END)
+    assert again.items_processed == 0
+    # Every recommendation still has exactly one (initial) version.
+    assert _count(sqlite_session, Recommendation) == _count(sqlite_session, RecommendationVersion)
+    assert all(v.version == 1 for v in sqlite_session.scalars(select(RecommendationVersion)))
+    assert _count(sqlite_session, Recommendation) > 3  # catalog strategies qualify too

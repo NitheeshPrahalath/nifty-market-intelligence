@@ -18,6 +18,9 @@ Examples
     nmi compute-regime --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
     nmi compute-horizon --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
     nmi compute-scoring --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
+    nmi seed-strategies
+    nmi compute-signals --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
+    nmi generate-recommendations --index NIFTY_50
     nmi compute-eod --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
 """
 
@@ -207,7 +210,7 @@ def compute_eod(
     end: str | None = typer.Option(None, "--end"),
     db_url: str | None = typer.Option(None, "--db-url"),
 ):
-    """Run the full EOD chain: metrics (Phase 2) + analysis (Phase 3)."""
+    """Run the full EOD chain: metrics (Phase 2), analysis (Phase 3), strategies (Phase 4)."""
     from nmi.metrics.service import MetricsService
 
     index_codes = [c.strip() for c in index.split(",") if c.strip()]
@@ -288,6 +291,47 @@ def compute_scoring(
             parameter_set,
         )
     typer.echo(result.as_dict())
+
+
+@app.command()
+def compute_signals(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Evaluate every active strategy version per member-day (Phase 4)."""
+    _run_metrics("compute_signals", db_url, index, start, end)
+
+
+@app.command()
+def generate_recommendations(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    as_of: str | None = typer.Option(None, "--as-of", help="Defaults to the latest signal day"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Turn qualifying signals into tracked recommendations (Phase 4)."""
+    from nmi.metrics.service import MetricsService
+
+    index_codes = [c.strip() for c in index.split(",") if c.strip()]
+    with _sessionctx(db_url) as session:
+        result = MetricsService(session).generate_recommendations(
+            index_codes, _cli_date(as_of) if as_of else None
+        )
+    typer.echo(result.as_dict())
+
+
+@app.command()
+def seed_strategies(
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Seed the default strategy catalog and its first rule versions (Phase 4)."""
+    from nmi.metrics.service import MetricsService
+
+    with _sessionctx(db_url) as session:
+        stored = MetricsService(session).seed_strategies()
+        session.commit()
+    typer.echo({"strategy_versions_created": stored})
 
 
 def main() -> None:

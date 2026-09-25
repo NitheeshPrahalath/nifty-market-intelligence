@@ -845,6 +845,311 @@ class StrategyParameter(Base):
     description: Mapped[str | None] = mapped_column(Text)
 
 
+class SignalType(enum.StrEnum):
+    BUY_SETUP = "BUY_SETUP"
+    WATCH = "WATCH"
+    HOLD = "HOLD"
+    REDUCE = "REDUCE"
+    EXIT_WARNING = "EXIT_WARNING"
+    EXIT = "EXIT"
+
+
+class RecommendationState(enum.StrEnum):
+    WATCH = "WATCH"
+    POTENTIAL_ENTRY = "POTENTIAL_ENTRY"
+    ENTRY = "ENTRY"
+    HOLD = "HOLD"
+    THESIS_WEAKENING = "THESIS_WEAKENING"
+    EXIT_REVIEW = "EXIT_REVIEW"
+    EXIT = "EXIT"
+    CLOSED = "CLOSED"
+
+
+class RiskLevel(enum.StrEnum):
+    LOW = "LOW"
+    MODERATE = "MODERATE"
+    HIGH = "HIGH"
+    VERY_HIGH = "VERY_HIGH"
+
+
+class Strategy(Base):
+    """A named trading strategy (Phase 4).
+
+    A strategy is the stable identity; its thresholds live in immutable
+    ``StrategyVersion`` rows so every signal and recommendation can be traced
+    to the exact rule set that produced it.
+    """
+
+    __tablename__ = "strategies"
+    __table_args__ = (UniqueConstraint("code", name="uq_strategy_code"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(48), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    horizon: Mapped[HorizonType] = mapped_column(
+        Enum(
+            HorizonType,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class StrategyVersion(Base):
+    """One immutable rule-set version of a strategy (Phase 4).
+
+    ``rules`` is the declarative condition document evaluated by
+    ``nmi.strategies`` — the same module the backtester (Phase 6) reuses so
+    live and backtest behaviour cannot drift apart.
+    """
+
+    __tablename__ = "strategy_versions"
+    __table_args__ = (
+        UniqueConstraint("strategy_id", "version", name="uq_strategy_version"),
+        SqlIndex("ix_strategy_version_current", "strategy_id", "is_current"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strategy_id: Mapped[int] = mapped_column(ForeignKey("strategies.id"), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    engine_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    rules: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    is_current: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class Signal(Base):
+    """Daily strategy evaluation per instrument (Phase 4).
+
+    One immutable-per-(instrument, strategy version, day) row records what the
+    rules said, which conditions passed or failed and the resulting price
+    levels, so any later signal can be explained.
+    """
+
+    __tablename__ = "signals"
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_id",
+            "strategy_version_id",
+            "as_of",
+            "calc_version",
+            name="uq_signal_snapshot",
+        ),
+        SqlIndex("ix_signal_instrument_asof", "instrument_id", "as_of"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), nullable=False)
+    strategy_version_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_versions.id"), nullable=False
+    )
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    signal_type: Mapped[SignalType] = mapped_column(
+        Enum(
+            SignalType,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    state: Mapped[RecommendationState] = mapped_column(
+        Enum(
+            RecommendationState,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    horizon: Mapped[HorizonType] = mapped_column(
+        Enum(
+            HorizonType,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    composite_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    risk_level: Mapped[RiskLevel] = mapped_column(
+        Enum(
+            RiskLevel,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+
+    entry_low: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    entry_high: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    target_low: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    target_high: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    invalidation_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    expected_holding_days_min: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_holding_days_max: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    rules_result: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    reasons: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    thesis: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class Recommendation(Base):
+    """The tracked recommendation object (Phase 4).
+
+    Holds the current view of a live setup; every change is appended to
+    ``RecommendationVersion`` so the original recommendation is never
+    overwritten.
+    """
+
+    __tablename__ = "recommendations"
+    __table_args__ = (
+        SqlIndex("ix_recommendation_instrument_state", "instrument_id", "state"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), nullable=False)
+    strategy_version_id: Mapped[int] = mapped_column(
+        ForeignKey("strategy_versions.id"), nullable=False
+    )
+    strategy_code: Mapped[str] = mapped_column(String(48), nullable=False)
+    state: Mapped[RecommendationState] = mapped_column(
+        Enum(
+            RecommendationState,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    horizon: Mapped[HorizonType] = mapped_column(
+        Enum(
+            HorizonType,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    current_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    entry_low: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    entry_high: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    target_low: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    target_high: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    invalidation_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    risk_level: Mapped[RiskLevel] = mapped_column(
+        Enum(
+            RiskLevel,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    expected_holding_days_min: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_holding_days_max: Mapped[int] = mapped_column(Integer, nullable=False)
+    thesis: Mapped[str] = mapped_column(Text, nullable=False)
+    created_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    latest_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    first_as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    last_as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_reason: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class RecommendationVersion(Base):
+    """Append-only snapshot of a recommendation at one point in time (Phase 4).
+
+    Phase 5 appends a new version on every thesis change; the original row is
+    never modified, which is what makes a recommendation auditable.
+    """
+
+    __tablename__ = "recommendation_versions"
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", "version", name="uq_recommendation_version"),
+        SqlIndex("ix_recommendation_version_rec", "recommendation_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recommendation_id: Mapped[int] = mapped_column(
+        ForeignKey("recommendations.id"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    state: Mapped[RecommendationState] = mapped_column(
+        Enum(
+            RecommendationState,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    signal_type: Mapped[SignalType] = mapped_column(
+        Enum(
+            SignalType,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    composite_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    risk_level: Mapped[RiskLevel] = mapped_column(
+        Enum(
+            RiskLevel,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    entry_low: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    entry_high: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    target_low: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    target_high: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    invalidation_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    rules_result: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    reasons: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    change_summary: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
 class IngestionRun(Base):
     __tablename__ = "ingestion_runs"
 

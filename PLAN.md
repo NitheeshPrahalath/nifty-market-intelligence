@@ -115,7 +115,7 @@ never a plain BUY/SELL generator.
 - [x] **P1 Data Ingestion & Validation**
 - [x] **P2 Indicator & Metrics Engines**
 - [x] **P3 Regime / Sector / Horizon / Scoring**
-- [ ] P4 Strategy / Signal / Recommendation
+- [x] **P4 Strategy / Signal / Recommendation**
 - [ ] P5 Tracking / Thesis Monitoring / Exit / Notifications
 - [ ] P6 Backtesting Engine
 - [ ] P7 API Backend
