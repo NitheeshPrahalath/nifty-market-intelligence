@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     technical_volume_spike: float = 2.5
     rs_trend_threshold_pp: float = 0.5
 
+    # Analysis engines (Phase 3) tuning.
+    scoring_parameter_set: str = "default"
+
     # Validation tuning.
     validation_outlier_zscore: float = 8.0
     validation_max_gap_business_days: int = 5

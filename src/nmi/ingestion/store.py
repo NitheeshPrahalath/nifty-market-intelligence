@@ -23,15 +23,20 @@ from nmi.core.models import (
     CorporateAction,
     DailyPrice,
     FundamentalMetric,
+    HorizonMetric,
     IncomeStatement,
     Index,
     IndexMembership,
     IndexPrice,
     Industry,
     Instrument,
+    MarketRegime,
     MomentumMetric,
     RelativeStrengthMetric,
+    ScoringSnapshot,
     Sector,
+    SectorMetric,
+    StrategyParameter,
     TechnicalIndicator,
     ValuationMetric,
 )
@@ -527,3 +532,106 @@ def upsert_fundamental_metrics(
     )
     session.flush()
     return len(cleaned)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: regime / sector / horizon / scoring
+# ---------------------------------------------------------------------------
+
+
+def upsert_market_regimes(
+    session: Session, index_id: int, snapshots: Iterable[Mapping], calc_version: str
+) -> int:
+    rows = [{**{"index_id": index_id, "calc_version": calc_version}, **snap} for snap in snapshots]
+    rows = [{k: _clean_value(v) for k, v in r.items()} for r in rows]
+    _bulk_upsert(
+        session,
+        MarketRegime.__table__,
+        rows,
+        index_elements=["index_id", "as_of", "calc_version"],
+    )
+    session.flush()
+    return len(rows)
+
+
+def upsert_sector_metrics(
+    session: Session, index_id: int, snapshots: Iterable[Mapping], calc_version: str
+) -> int:
+    rows = [{**{"index_id": index_id, "calc_version": calc_version}, **snap} for snap in snapshots]
+    rows = [{k: _clean_value(v) for k, v in r.items()} for r in rows]
+    _bulk_upsert(
+        session,
+        SectorMetric.__table__,
+        rows,
+        index_elements=["index_id", "sector_id", "as_of", "calc_version"],
+    )
+    session.flush()
+    return len(rows)
+
+
+def upsert_horizon_metrics(
+    session: Session, instrument_id: int, snapshots: Iterable[Mapping], calc_version: str
+) -> int:
+    rows = [
+        {**{"instrument_id": instrument_id, "calc_version": calc_version}, **snap}
+        for snap in snapshots
+    ]
+    rows = [{k: _clean_value(v) for k, v in r.items()} for r in rows]
+    _bulk_upsert(
+        session,
+        HorizonMetric.__table__,
+        rows,
+        index_elements=["instrument_id", "as_of", "calc_version"],
+    )
+    session.flush()
+    return len(rows)
+
+
+def upsert_scoring_snapshots(
+    session: Session, instrument_id: int, snapshots: Iterable[Mapping], calc_version: str
+) -> int:
+    rows = [
+        {**{"instrument_id": instrument_id, "calc_version": calc_version}, **snap}
+        for snap in snapshots
+    ]
+    rows = [{k: _clean_value(v) for k, v in r.items()} for r in rows]
+    _bulk_upsert(
+        session,
+        ScoringSnapshot.__table__,
+        rows,
+        index_elements=["instrument_id", "as_of", "calc_version"],
+    )
+    session.flush()
+    return len(rows)
+
+
+def upsert_strategy_parameters(
+    session: Session, parameter_set: str, parameters: Mapping[str, float | None]
+) -> int:
+    """Seed/refresh scoring weights for a parameter set (idempotent)."""
+    rows = [
+        {
+            "parameter_set": parameter_set,
+            "name": name,
+            "value": _clean_value(value),
+            "description": None,
+        }
+        for name, value in parameters.items()
+    ]
+    _bulk_upsert(
+        session,
+        StrategyParameter.__table__,
+        rows,
+        index_elements=["parameter_set", "name"],
+        exclude_from_update={"description"},
+    )
+    session.flush()
+    return len(rows)
+
+
+def get_strategy_weights(session: Session, parameter_set: str = "default") -> dict[str, float]:
+    """Read the stored weights for a parameter set (empty when not seeded)."""
+    rows = session.scalars(
+        select(StrategyParameter).where(StrategyParameter.parameter_set == parameter_set)
+    ).all()
+    return {row.name: float(row.value) for row in rows if row.value is not None}

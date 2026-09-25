@@ -13,6 +13,11 @@ Examples
     nmi compute-momentum --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
     nmi compute-valuation --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
     nmi compute-fundamentals --index NIFTY_50
+    nmi seed-strategy-parameters
+    nmi compute-sector --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
+    nmi compute-regime --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
+    nmi compute-horizon --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
+    nmi compute-scoring --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
     nmi compute-eod --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
 """
 
@@ -202,7 +207,7 @@ def compute_eod(
     end: str | None = typer.Option(None, "--end"),
     db_url: str | None = typer.Option(None, "--db-url"),
 ):
-    """Run fundamentals + technical + momentum + valuation for index members."""
+    """Run the full EOD chain: metrics (Phase 2) + analysis (Phase 3)."""
     from nmi.metrics.service import MetricsService
 
     index_codes = [c.strip() for c in index.split(",") if c.strip()]
@@ -214,6 +219,75 @@ def compute_eod(
         )
     for res in results:
         typer.echo(res.as_dict())
+
+
+@app.command()
+def seed_strategy_parameters(
+    parameter_set: str | None = typer.Option(None, "--parameter-set"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Persist the default scoring component weights into strategy_parameters."""
+    from nmi.metrics.service import MetricsService
+
+    with _sessionctx(db_url) as session:
+        stored = MetricsService(session).seed_strategy_parameters(parameter_set)
+        session.commit()
+    typer.echo({"parameter_set": parameter_set or settings.scoring_parameter_set, "stored": stored})
+
+
+@app.command()
+def compute_sector(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Aggregate per-sector cross-sectional metrics for index members."""
+    _run_metrics("compute_sector", db_url, index, start, end)
+
+
+@app.command()
+def compute_regime(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Score the market regime (breadth, momentum, vol, drawdown, sectors)."""
+    _run_metrics("compute_regime", db_url, index, start, end)
+
+
+@app.command()
+def compute_horizon(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Score short/medium/long-horizon fit for index members."""
+    _run_metrics("compute_horizon", db_url, index, start, end)
+
+
+@app.command()
+def compute_scoring(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    parameter_set: str | None = typer.Option(None, "--parameter-set"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Compute eight component scores and the weighted composite per member-day."""
+    from nmi.metrics.service import MetricsService
+
+    index_codes = [c.strip() for c in index.split(",") if c.strip()]
+    with _sessionctx(db_url) as session:
+        result = MetricsService(session).compute_scoring(
+            index_codes,
+            _cli_date(start) if start else None,
+            _cli_date(end) if end else None,
+            parameter_set,
+        )
+    typer.echo(result.as_dict())
 
 
 def main() -> None:

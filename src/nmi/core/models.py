@@ -605,6 +605,246 @@ class ValuationMetric(Base):
     )
 
 
+class MarketRegimeLabel(enum.StrEnum):
+    RISK_ON = "RISK_ON"
+    CAUTIOUS = "CAUTIOUS"
+    RISK_OFF = "RISK_OFF"
+    STRESSED = "STRESSED"
+
+
+class MarketRegime(Base):
+    """Market-regime snapshot (Phase 3) for one index, per as-of day.
+
+    Combines breadth (% of members above their own SMAs), index momentum,
+    realised volatility, index drawdown and sector participation into a single
+    0-100 ``regime_score`` plus an interpretable ``regime_label``.
+    """
+
+    __tablename__ = "market_regimes"
+    __table_args__ = (
+        UniqueConstraint("index_id", "as_of", "calc_version", name="uq_market_regime_snapshot"),
+        SqlIndex("ix_market_regime_index_asof", "index_id", "as_of"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    index_id: Mapped[int] = mapped_column(ForeignKey("indices.id"), nullable=False)
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    member_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    members_above_sma20: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    members_above_sma50: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    members_above_sma200: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    breadth_above_sma20_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    breadth_above_sma50_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    breadth_above_sma200_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+
+    index_return_1m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    index_return_3m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    index_return_6m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    index_hist_vol_20: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    index_hist_vol_60: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    index_drawdown_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+
+    sector_participation_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    regime_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    regime_label: Mapped[MarketRegimeLabel] = mapped_column(
+        Enum(
+            MarketRegimeLabel,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class SectorState(enum.StrEnum):
+    LEADING = "LEADING"
+    NEUTRAL = "NEUTRAL"
+    LAGGING = "LAGGING"
+    DEFENSIVE = "DEFENSIVE"
+
+
+class SectorMetric(Base):
+    """Cross-sectional sector aggregates (Phase 3) within one index."""
+
+    __tablename__ = "sector_metrics"
+    __table_args__ = (
+        UniqueConstraint(
+            "index_id",
+            "sector_id",
+            "as_of",
+            "calc_version",
+            name="uq_sector_metric_snapshot",
+        ),
+        SqlIndex("ix_sector_metric_index_asof", "index_id", "as_of"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    index_id: Mapped[int] = mapped_column(ForeignKey("indices.id"), nullable=False)
+    sector_id: Mapped[int] = mapped_column(ForeignKey("sectors.id"), nullable=False)
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    member_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    breadth_above_sma50_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    breadth_above_sma200_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    avg_return_1m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    avg_return_3m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    avg_return_6m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    avg_rs_3m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    avg_rsi14: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    relative_to_index_pct: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    sector_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    sector_state: Mapped[SectorState] = mapped_column(
+        Enum(
+            SectorState,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class HorizonType(enum.StrEnum):
+    SHORT_TERM = "SHORT_TERM"
+    MEDIUM_TERM = "MEDIUM_TERM"
+    LONG_TERM = "LONG_TERM"
+
+
+class HorizonMetric(Base):
+    """Short/medium/long-horizon fit scores (Phase 3) per instrument-day.
+
+    The three scores are always comparable on a 0-100 scale; ``preferred_horizon``
+    names the dominant one, which the scoring engine uses to select component
+    emphasis downstream.
+    """
+
+    __tablename__ = "horizon_metrics"
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "as_of", "calc_version", name="uq_horizon_snapshot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), nullable=False)
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    short_term_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    medium_term_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    long_term_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    preferred_horizon: Mapped[HorizonType] = mapped_column(
+        Enum(
+            HorizonType,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    horizon_confidence: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class ScoreLabel(enum.StrEnum):
+    STRONG = "STRONG"
+    GOOD = "GOOD"
+    NEUTRAL = "NEUTRAL"
+    WEAK = "WEAK"
+    POOR = "POOR"
+
+
+class ScoringSnapshot(Base):
+    """Eight component scores plus the weighted composite (Phase 3).
+
+    ``parameter_set`` records which ``strategy_parameters`` set produced the
+    weights, so a score can always be explained and reproduced.
+    """
+
+    __tablename__ = "scoring_snapshots"
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "as_of", "calc_version", name="uq_scoring_snapshot"),
+        SqlIndex("ix_scoring_instrument_asof", "instrument_id", "as_of"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), nullable=False)
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    parameter_set: Mapped[str] = mapped_column(String(32), nullable=False)
+    preferred_horizon: Mapped[HorizonType] = mapped_column(
+        Enum(
+            HorizonType,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+
+    trend_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    momentum_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    relative_strength_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    quality_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    growth_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    valuation_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    risk_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    liquidity_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    horizon_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    sector_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    composite_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    score_label: Mapped[ScoreLabel] = mapped_column(
+        Enum(
+            ScoreLabel,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class StrategyParameter(Base):
+    """Named, versioned strategy tunables (Phase 3).
+
+    Scoring weights live here (one row per component per parameter set) so they
+    can be audited, adjusted and rolled back without touching code.
+    """
+
+    __tablename__ = "strategy_parameters"
+    __table_args__ = (UniqueConstraint("parameter_set", "name", name="uq_strategy_parameter_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parameter_set: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
+    value: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+
+
 class IngestionRun(Base):
     __tablename__ = "ingestion_runs"
 
