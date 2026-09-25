@@ -8,6 +8,12 @@ Examples
         --start 2024-01-01 --end 2025-06-30 --provider csv
     nmi backfill-actions --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
     nmi backfill-fundamentals
+    nmi backfill-index-prices --index NIFTY_50,NIFTY_IT
+    nmi compute-tech --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
+    nmi compute-momentum --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
+    nmi compute-valuation --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
+    nmi compute-fundamentals --index NIFTY_50
+    nmi compute-eod --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
 """
 
 from __future__ import annotations
@@ -111,6 +117,103 @@ def backfill_fundamentals(
             [i.strip() for i in isins.split(",") if i.strip()] if isins else None
         )
     typer.echo(result.as_dict())
+
+
+def _run_metrics(job: str, db_url: str | None, index: str, start: str | None, end: str | None):
+    init_engine(url=db_url)
+    from nmi.metrics.service import MetricsService
+
+    index_codes = [c.strip() for c in index.split(",") if c.strip()]
+    with get_session() as session:
+        svc = MetricsService(session)
+        result = getattr(svc, job)(
+            index_codes,
+            _cli_date(start) if start else None,
+            _cli_date(end) if end else None,
+        )
+    typer.echo(result.as_dict())
+
+
+@app.command()
+def backfill_index_prices(
+    index: str = typer.Option(..., "--index", help="Comma-separated benchmark index codes"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Load index close series (benchmarks for relative strength)."""
+    from nmi.metrics.service import MetricsService
+
+    index_codes = [c.strip() for c in index.split(",") if c.strip()]
+    with _sessionctx(db_url) as session:
+        result = MetricsService(session).backfill_index_prices(index_codes)
+    typer.echo(result.as_dict())
+
+
+@app.command()
+def compute_tech(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Compute per-day technical indicators for index members."""
+    _run_metrics("compute_technical", db_url, index, start, end)
+
+
+@app.command()
+def compute_momentum(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Compute trailing returns and relative strength vs configured benchmarks."""
+    _run_metrics("compute_momentum", db_url, index, start, end)
+
+
+@app.command()
+def compute_valuation(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Compute per-day valuation multiples (as-of fundamentals, no look-ahead)."""
+    _run_metrics("compute_valuation", db_url, index, start, end)
+
+
+@app.command()
+def compute_fundamentals(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Compute derived fundamental metrics & quality scores for index members."""
+    from nmi.metrics.service import MetricsService
+
+    index_codes = [c.strip() for c in index.split(",") if c.strip()]
+    with _sessionctx(db_url) as session:
+        result = MetricsService(session).compute_fundamentals(index_codes)
+    typer.echo(result.as_dict())
+
+
+@app.command()
+def compute_eod(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    start: str | None = typer.Option(None, "--start"),
+    end: str | None = typer.Option(None, "--end"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Run fundamentals + technical + momentum + valuation for index members."""
+    from nmi.metrics.service import MetricsService
+
+    index_codes = [c.strip() for c in index.split(",") if c.strip()]
+    with _sessionctx(db_url) as session:
+        results = MetricsService(session).compute_eod(
+            index_codes,
+            _cli_date(start) if start else None,
+            _cli_date(end) if end else None,
+        )
+    for res in results:
+        typer.echo(res.as_dict())
 
 
 def main() -> None:

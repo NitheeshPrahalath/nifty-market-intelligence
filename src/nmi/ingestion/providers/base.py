@@ -25,6 +25,7 @@ _FAMILY_SETTING = {
     "corporate_action": "corporate_action_provider",
     "index_membership": "index_membership_provider",
     "universe": "index_membership_provider",
+    "index_price": "index_price_provider",
 }
 
 
@@ -85,6 +86,7 @@ def get_provider(family: str) -> object:
         from nmi.ingestion.providers.csv_provider import (
             CSVCorporateActionProvider,
             CSVFundamentalProvider,
+            CSVIndexPriceProvider,
             CSVMembershipProvider,
             CSVPriceProvider,
             CSVUniverseProvider,
@@ -96,6 +98,7 @@ def get_provider(family: str) -> object:
             "corporate_action": CSVCorporateActionProvider,
             "index_membership": CSVMembershipProvider,
             "universe": CSVUniverseProvider,
+            "index_price": CSVIndexPriceProvider,
         }
         return mapping[family]()
     if provider_name == "yahoo" and family == "price":
@@ -127,3 +130,7 @@ def fundamental_provider() -> FundamentalProvider:
 
 def universe_provider() -> UniverseProvider:
     return get_provider("universe")  # type: ignore[return-value]
+
+
+def index_price_provider() -> object:
+    return get_provider("index_price")

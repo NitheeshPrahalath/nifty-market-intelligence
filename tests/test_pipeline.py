@@ -118,9 +118,9 @@ def test_actions_and_fundamentals_backfill(sqlite_session, pointed_at_fixtures):
 
     funds = svc.backfill_fundamentals()
     assert funds.status == RunStatus.SUCCEEDED
-    assert sqlite_session.scalar(select(func.count()).select_from(IncomeStatement)) == 3
-    assert sqlite_session.scalar(select(func.count()).select_from(BalanceSheet)) == 2
-    assert sqlite_session.scalar(select(func.count()).select_from(CashFlow)) == 2
+    assert sqlite_session.scalar(select(func.count()).select_from(IncomeStatement)) == 11
+    assert sqlite_session.scalar(select(func.count()).select_from(BalanceSheet)) == 7
+    assert sqlite_session.scalar(select(func.count()).select_from(CashFlow)) == 7
 
 
 def test_incomplete_rows_still_stored_but_flagged(sqlite_session, pointed_at_fixtures):

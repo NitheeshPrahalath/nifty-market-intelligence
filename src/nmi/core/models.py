@@ -15,6 +15,7 @@ never overwritten in place; later phases add version-aware tables.
 
 from __future__ import annotations
 
+import enum
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -287,6 +288,7 @@ class IncomeStatement(Base):
     ebitda: Mapped[Decimal | None] = mapped_column(Numeric(20, 2))
     ebitda_margin_pct: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     net_margin_pct: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
+    shares_outstanding: Mapped[int | None] = mapped_column(BigInteger)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
     extras: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
@@ -379,6 +381,228 @@ class FundamentalMetric(Base):
     as_of: Mapped[date] = mapped_column(Date, nullable=False)
     period_end: Mapped[date | None] = mapped_column(Date)
     source: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class IndexPrice(Base):
+    """Close history of an index (benchmark for relative strength / regimes).
+
+    Benchmarks (Nifty 50, sector indices, ...) are their own time series; they
+    are intentionally separate from instrument prices so their loading logic
+    can differ from equity EOD ingestion.
+    """
+
+    __tablename__ = "index_prices"
+    __table_args__ = (
+        UniqueConstraint("index_id", "trade_date", name="uq_index_price_per_day"),
+        SqlIndex("ix_index_prices_index_date", "index_id", "trade_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    index_id: Mapped[int] = mapped_column(ForeignKey("indices.id"), nullable=False)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False)
+    open: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    high: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    low: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    close: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    volume: Mapped[int | None] = mapped_column(BigInteger)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class TechnicalIndicator(Base):
+    """Wide, versioned time-series of daily technical indicators.
+
+    Only numeric values are stored here (interpretations like "bullish" are
+    derived downstream). ``calc_version`` lets the platform recompute with a
+    newer definition while keeping historical values auditably separated.
+    """
+
+    __tablename__ = "technical_indicators"
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_id", "as_of", "calc_version", name="uq_tech_snapshot"
+        ),
+        SqlIndex("ix_technical_instrument_asof", "instrument_id", "as_of"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.id"), nullable=False
+    )
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    sma20: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    sma50: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    sma100: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    sma200: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    ema20: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    ema50: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    ema200: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+
+    rsi14: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    macd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    macd_signal: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    macd_hist: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    roc10: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    stoch_k: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    stoch_d: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    williams_r: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    cci20: Mapped[Decimal | None] = mapped_column(Numeric(16, 4))
+    adx14: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    plus_di14: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    minus_di14: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+
+    atr14: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    hist_vol_20: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    hist_vol_60: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    bollinger_upper: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    bollinger_middle: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    bollinger_lower: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    bollinger_width: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    bollinger_percent_b: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+
+    volume_sma20: Mapped[int | None] = mapped_column(BigInteger)
+    volume_ratio: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    volume_spike: Mapped[bool] = mapped_column(default=False, nullable=False)
+    obv: Mapped[Decimal | None] = mapped_column(Numeric(24, 2))
+
+    high_52w: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    low_52w: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    dist_from_high_52w_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    dist_from_low_52w_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    drawdown_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    recovery_pct: Mapped[Decimal | None] = mapped_column(Numeric(14, 4))
+    breakout_52w: Mapped[bool] = mapped_column(default=False, nullable=False)
+    breakdown_52w: Mapped[bool] = mapped_column(default=False, nullable=False)
+    trend_state: Mapped[str | None] = mapped_column(String(24))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class MomentumMetric(Base):
+    __tablename__ = "momentum_metrics"
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_id", "as_of", "calc_version", name="uq_momentum_snapshot"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.id"), nullable=False
+    )
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    return_1m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    return_3m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    return_6m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    return_12m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class RSTrend(enum.StrEnum):
+    IMPROVING = "IMPROVING"
+    STABLE = "STABLE"
+    DETERIORATING = "DETERIORATING"
+
+
+class RelativeStrengthMetric(Base):
+    __tablename__ = "relative_strength_metrics"
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_id", "as_of", "benchmark", "calc_version",
+            name="uq_relative_strength_snapshot",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.id"), nullable=False
+    )
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    benchmark: Mapped[str] = mapped_column(String(64), nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    rs_1m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    rs_3m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    rs_6m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    rs_12m: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    rs_trend: Mapped[RSTrend] = mapped_column(
+        Enum(RSTrend, native_enum=False, values_callable=lambda e: [x.value for x in e]),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class ValuationLabel(enum.StrEnum):
+    CHEAP = "CHEAP"
+    FAIRLY_VALUED = "FAIRLY_VALUED"
+    MODERATELY_EXPENSIVE = "MODERATELY_EXPENSIVE"
+    EXPENSIVE = "EXPENSIVE"
+
+
+class ValuationMetric(Base):
+    __tablename__ = "valuation_metrics"
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_id", "as_of", "calc_version", name="uq_valuation_snapshot"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.id"), nullable=False
+    )
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    pe: Mapped[Decimal | None] = mapped_column(Numeric(16, 4))
+    pb: Mapped[Decimal | None] = mapped_column(Numeric(16, 4))
+    ev_ebitda: Mapped[Decimal | None] = mapped_column(Numeric(16, 4))
+    peg: Mapped[Decimal | None] = mapped_column(Numeric(16, 4))
+    dividend_yield: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    fcf_yield: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+
+    pe_median_3y: Mapped[Decimal | None] = mapped_column(Numeric(16, 4))
+    pe_percentile_3y: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    pe_deviation_pct: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    pb_percentile_3y: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    ev_ebitda_percentile_3y: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+
+    valuation_label: Mapped[ValuationLabel] = mapped_column(
+        Enum(
+            ValuationLabel,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
 
 
 class IngestionRun(Base):

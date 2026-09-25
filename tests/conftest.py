@@ -46,21 +46,40 @@ def pointed_at_fixtures():
 
     original = {
         "data_dir": settings.data_dir,
+        "prices_dir": settings.prices_dir,
         "membership_dir": settings.membership_dir,
         "corporate_actions_dir": settings.corporate_actions_dir,
         "fundamentals_dir": settings.fundamentals_dir,
+        "indexes_dir": settings.indexes_dir,
     }
     settings.data_dir = FIXTURES
+    settings.prices_dir = FIXTURES / "prices"
     settings.membership_dir = FIXTURES / "memberships"
     settings.corporate_actions_dir = FIXTURES / "corporate_actions"
     settings.fundamentals_dir = FIXTURES / "fundamentals"
+    settings.indexes_dir = FIXTURES / "indexes"
     try:
         yield settings
     finally:
         settings.data_dir = original["data_dir"]
+        settings.prices_dir = original["prices_dir"]
         settings.membership_dir = original["membership_dir"]
         settings.corporate_actions_dir = original["corporate_actions_dir"]
         settings.fundamentals_dir = original["fundamentals_dir"]
+        settings.indexes_dir = original["indexes_dir"]
+
+
+@pytest.fixture()
+def pointed_at_long_fixtures(pointed_at_fixtures):
+    """Point the price provider at the 252-session fixtures; keep the rest."""
+    from nmi.core.config import settings
+
+    prev = settings.prices_dir
+    settings.prices_dir = FIXTURES / "longdata" / "prices"
+    try:
+        yield settings
+    finally:
+        settings.prices_dir = prev
 
 
 def _bizdays(start: date, n: int) -> list[date]:

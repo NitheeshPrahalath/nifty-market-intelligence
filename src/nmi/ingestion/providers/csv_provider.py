@@ -31,6 +31,7 @@ from nmi.ingestion.records import (
     CorporateActionRecord,
     IncomeStatementRecord,
     IndexMembershipRecord,
+    IndexPriceRecord,
     UniverseRow,
 )
 
@@ -60,7 +61,7 @@ class CSVPriceProvider:
     name = "csv"
 
     def __init__(self, prices_dir: Path | None = None):
-        self.prices_dir = prices_dir or settings.data_dir / "prices"
+        self.prices_dir = prices_dir or settings.prices_dir
 
     def fetch_prices(
         self,
@@ -93,6 +94,44 @@ class CSVPriceProvider:
             if end and candle.trade_date > end:
                 continue
             records.append(candle)
+        return records
+
+
+class CSVIndexPriceProvider:
+    """Reads benchmark index closes from per-index CSVs (e.g. ``NIFTY_50.csv``)."""
+
+    name = "csv"
+
+    def __init__(self, indexes_dir: Path | None = None):
+        self.indexes_dir = indexes_dir or settings.indexes_dir
+
+    def fetch_index_prices(
+        self,
+        index_code: str,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> list[IndexPriceRecord]:
+        path = self.indexes_dir / f"{index_code}.csv"
+        df = _read(path, required=False)
+        records: list[IndexPriceRecord] = []
+        stamp = _NOW()
+        for _, row in df.iterrows():
+            rec = IndexPriceRecord(
+                index_code=index_code,
+                trade_date=_as_date(row.get("date")),
+                open=row.get("open"),
+                high=row.get("high"),
+                low=row.get("low"),
+                close=row.get("close"),
+                volume=_clean_int(row.get("volume")) if not pd.isna(row.get("volume")) else None,
+                source=self.name,
+                source_timestamp=stamp,
+            )
+            if start and rec.trade_date < start:
+                continue
+            if end and rec.trade_date > end:
+                continue
+            records.append(rec)
         return records
 
 
@@ -259,6 +298,7 @@ class CSVFundamentalProvider:
             ebitda=row.get("ebitda"),
             ebitda_margin_pct=row.get("ebitda_margin_pct"),
             net_margin_pct=row.get("net_margin_pct"),
+            shares_outstanding=_clean_int(row.get("shares_outstanding")),
             source="csv",
             source_timestamp=_NOW(),
         )

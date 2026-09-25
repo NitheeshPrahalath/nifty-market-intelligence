@@ -68,10 +68,11 @@ def test_csv_corporate_action_provider(pointed_at_fixtures):
 def test_csv_fundamental_provider(pointed_at_fixtures):
     provider = CSVFundamentalProvider(fundamentals_dir=FIXTURES / "fundamentals")
     income = provider.fetch_income_statements(isins=["INE002A01018"])
-    assert len(income) == 2
-    assert income[0].period_end == date(2024, 3, 31)
-    assert income[0].total_revenue is not None
+    assert len(income) == 5
+    assert income[-1].period_end == date(2024, 3, 31)
+    assert income[-1].total_revenue is not None
+    assert income[-1].shares_outstanding == 6_765_000_000
     balance = provider.fetch_balance_sheets(isins=["INE002A01018"])
-    assert len(balance) == 1
+    assert len(balance) == 3
     cash = provider.fetch_cash_flows(isins=["INE002A01018"])
-    assert len(cash) == 1
+    assert len(cash) == 3

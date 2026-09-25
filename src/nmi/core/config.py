@@ -27,13 +27,22 @@ class Settings(BaseSettings):
     fundamental_provider: str = "csv"
     corporate_action_provider: str = "csv"
     index_membership_provider: str = "csv"
+    index_price_provider: str = "csv"
     market_data_symbol_suffix: str = ".NS"  # yahoo suffix for NSE-listed equities
 
     # Local data directories used by the "csv" family of providers.
     data_dir: Path = Field(default=Path("./data/raw"))
+    prices_dir: Path = Field(default=Path("./data/raw/prices"))
     membership_dir: Path = Field(default=Path("./data/raw/memberships"))
     corporate_actions_dir: Path = Field(default=Path("./data/raw/corporate_actions"))
     fundamentals_dir: Path = Field(default=Path("./data/raw/fundamentals"))
+    indexes_dir: Path = Field(default=Path("./data/raw/indexes"))
+
+    # Metrics engine (Phase 2) tuning.
+    calc_version: str = "v1"
+    rs_benchmarks: list[str] = ["NIFTY_50"]
+    technical_volume_spike: float = 2.5
+    rs_trend_threshold_pp: float = 0.5
 
     # Validation tuning.
     validation_outlier_zscore: float = 8.0

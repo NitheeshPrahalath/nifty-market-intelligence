@@ -22,12 +22,18 @@ from nmi.core.models import (
     Company,
     CorporateAction,
     DailyPrice,
+    FundamentalMetric,
     IncomeStatement,
     Index,
     IndexMembership,
+    IndexPrice,
     Industry,
     Instrument,
+    MomentumMetric,
+    RelativeStrengthMetric,
     Sector,
+    TechnicalIndicator,
+    ValuationMetric,
 )
 from nmi.ingestion.adjustments import AdjustedCandle
 from nmi.ingestion.records import (
@@ -360,3 +366,164 @@ def upsert_cash_flows(
     session: Session, records: list[CashFlowRecord], company_by_isin: dict[str, int]
 ) -> int:
     return upsert_statements(session, CashFlow.__table__, records, company_by_isin)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: metrics / benchmarks
+# ---------------------------------------------------------------------------
+
+def _clean_value(v):
+    """Map float NaN/Inf to None so Numeric columns stay valid on Postgres."""
+    if v is None:
+        return None
+    import math
+
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
+    return v
+
+
+def upsert_index_prices(
+    session: Session,
+    index_id: int,
+    rows: Iterable[Mapping],
+    source: str,
+    source_timestamp: object = None,
+) -> int:
+    """Idempotently persist index closes keyed on (index, trade_date)."""
+    cleaned = []
+    for row in rows:
+        cleaned.append(
+            {
+                "index_id": index_id,
+                "trade_date": row["trade_date"],
+                "open": _clean_value(row.get("open")),
+                "high": _clean_value(row.get("high")),
+                "low": _clean_value(row.get("low")),
+                "close": _clean_value(row["close"]),
+                "volume": row.get("volume"),
+                "source": row.get("source", source),
+                "source_timestamp": row.get("source_timestamp", source_timestamp),
+            }
+        )
+    _bulk_upsert(
+        session, IndexPrice.__table__, cleaned, index_elements=["index_id", "trade_date"]
+    )
+    session.flush()
+    return len(cleaned)
+
+
+def upsert_technical_indicators(
+    session: Session,
+    instrument_id: int,
+    snapshots: Iterable[Mapping],
+    calc_version: str,
+) -> int:
+    rows = [
+        {**{"instrument_id": instrument_id, "calc_version": calc_version}, **snap}
+        for snap in snapshots
+    ]
+    rows = [{k: _clean_value(v) for k, v in r.items()} for r in rows]
+    _bulk_upsert(
+        session,
+        TechnicalIndicator.__table__,
+        rows,
+        index_elements=["instrument_id", "as_of", "calc_version"],
+    )
+    session.flush()
+    return len(rows)
+
+
+def upsert_momentum_metrics(
+    session: Session,
+    instrument_id: int,
+    snapshots: Iterable[Mapping],
+    calc_version: str,
+) -> int:
+    rows = [
+        {**{"instrument_id": instrument_id, "calc_version": calc_version}, **snap}
+        for snap in snapshots
+    ]
+    rows = [{k: _clean_value(v) for k, v in r.items()} for r in rows]
+    _bulk_upsert(
+        session,
+        MomentumMetric.__table__,
+        rows,
+        index_elements=["instrument_id", "as_of", "calc_version"],
+    )
+    session.flush()
+    return len(rows)
+
+
+def upsert_relative_strength_metrics(
+    session: Session,
+    instrument_id: int,
+    snapshots: Iterable[Mapping],
+    benchmark: str,
+    calc_version: str,
+) -> int:
+    rows = [
+        {
+            **{
+                "instrument_id": instrument_id,
+                "benchmark": benchmark,
+                "calc_version": calc_version,
+            },
+            **snap,
+        }
+        for snap in snapshots
+    ]
+    rows = [{k: _clean_value(v) for k, v in r.items()} for r in rows]
+    _bulk_upsert(
+        session,
+        RelativeStrengthMetric.__table__,
+        rows,
+        index_elements=["instrument_id", "as_of", "benchmark", "calc_version"],
+    )
+    session.flush()
+    return len(rows)
+
+
+def upsert_valuation_metrics(
+    session: Session,
+    instrument_id: int,
+    snapshots: Iterable[Mapping],
+    calc_version: str,
+) -> int:
+    rows = [
+        {**{"instrument_id": instrument_id, "calc_version": calc_version}, **snap}
+        for snap in snapshots
+    ]
+    rows = [{k: _clean_value(v) for k, v in r.items()} for r in rows]
+    _bulk_upsert(
+        session,
+        ValuationMetric.__table__,
+        rows,
+        index_elements=["instrument_id", "as_of", "calc_version"],
+    )
+    session.flush()
+    return len(rows)
+
+
+def upsert_fundamental_metrics(
+    session: Session, company_id: int, rows: Iterable[Mapping]
+) -> int:
+    cleaned = [
+        {
+            "company_id": company_id,
+            "metric": row["metric"],
+            "value": _clean_value(row.get("value")),
+            "as_of": row["as_of"],
+            "period_end": row.get("period_end"),
+            "source": row.get("source", "engine"),
+        }
+        for row in rows
+    ]
+    _bulk_upsert(
+        session,
+        FundamentalMetric.__table__,
+        cleaned,
+        index_elements=["company_id", "metric", "as_of"],
+    )
+    session.flush()
+    return len(cleaned)

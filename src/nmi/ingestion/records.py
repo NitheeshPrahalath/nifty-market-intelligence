@@ -70,6 +70,33 @@ class Candle(BaseModel):
         return d
 
 
+class IndexPriceRecord(BaseModel):
+    """One validated index close for benchmark/relative-strength series."""
+
+    index_code: str = Field(max_length=60)
+    trade_date: date
+    open: Decimal | None = None
+    high: Decimal | None = None
+    low: Decimal | None = None
+    close: Decimal
+    volume: int | None = None
+    source: str
+    source_timestamp: datetime | None = None
+
+    @field_validator("open", "high", "low", "close", mode="before")
+    @classmethod
+    def _dex(cls, v) -> Decimal | None:
+        return _decimal(v)
+
+    @field_validator("trade_date", mode="before")
+    @classmethod
+    def _ddate(cls, v) -> date:
+        d = _date(v)
+        if d is None:
+            raise ValueError("trade_date is required")
+        return d
+
+
 class CorporateActionRecord(BaseModel):
     symbol: str = Field(max_length=32)
     exchange: Exchange = Exchange.NSE
@@ -167,6 +194,7 @@ class IncomeStatementRecord(StatementRecord):
     ebitda: Decimal | None = None
     ebitda_margin_pct: Decimal | None = None
     net_margin_pct: Decimal | None = None
+    shares_outstanding: int | None = None
 
     @field_validator(
         "total_revenue",
@@ -181,6 +209,13 @@ class IncomeStatementRecord(StatementRecord):
     @classmethod
     def _dex(cls, v) -> Decimal | None:
         return _decimal(v)
+
+    @field_validator("shares_outstanding", mode="before")
+    @classmethod
+    def _shares(cls, v) -> int | None:
+        if v in (None, ""):
+            return None
+        return int(v)
 
 
 class BalanceSheetRecord(StatementRecord):
