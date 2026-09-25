@@ -1,0 +1,2320 @@
+Natsu, I would design this as a **market-intelligence and decision-support platform**, not merely a stock screener. The key is that every recommendation should be **explainable, trackable, backtestable, and continuously re-evaluated**.
+
+Also, I would avoid calling any part of it “foolproof” in the financial sense. The **software architecture can be robust**, but no system can make stock predictions foolproof. The design below should explicitly account for bad data, changing market regimes, false signals, corporate actions, and model failure.
+
+# 1. Plain architecture
+
+At the highest level:
+
+```text
+                    ┌─────────────────────────┐
+                    │      USER / CLIENT       │
+                    │ Web / Mobile / Desktop   │
+                    └────────────┬────────────┘
+                                 │
+                                 ▼
+                    ┌─────────────────────────┐
+                    │       API BACKEND       │
+                    │      FastAPI / REST     │
+                    └────────────┬────────────┘
+                                 │
+              ┌──────────────────┼──────────────────┐
+              │                  │                  │
+              ▼                  ▼                  ▼
+       ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+       │  Analysis   │    │ Portfolio / │    │ Notification│
+       │   Engine    │    │   Tracking  │    │    Engine   │
+       └──────┬──────┘    └──────┬──────┘    └──────┬──────┘
+              │                  │                  │
+              └──────────────────┼──────────────────┘
+                                 ▼
+                    ┌─────────────────────────┐
+                    │      MARKET ENGINE      │
+                    │                         │
+                    │ Technical Analysis      │
+                    │ Fundamental Analysis    │
+                    │ Valuation               │
+                    │ Momentum                │
+                    │ Volatility              │
+                    │ Market Breadth           │
+                    │ Sector Analysis          │
+                    │ Relative Strength        │
+                    │ Risk Analysis            │
+                    │ Market Regime            │
+                    └────────────┬────────────┘
+                                 │
+                                 ▼
+                    ┌─────────────────────────┐
+                    │   SIGNAL / DECISION     │
+                    │        ENGINE           │
+                    │                         │
+                    │ Buy Setup               │
+                    │ Watch                   │
+                    │ Hold                    │
+                    │ Reduce                  │
+                    │ Exit Warning            │
+                    │ Exit                    │
+                    └────────────┬────────────┘
+                                 │
+                                 ▼
+                    ┌─────────────────────────┐
+                    │       DATABASE          │
+                    │                         │
+                    │ Stocks                  │
+                    │ Historical Prices       │
+                    │ Fundamentals            │
+                    │ Indicators              │
+                    │ Signals                 │
+                    │ Recommendations         │
+                    │ Positions               │
+                    │ Events                  │
+                    │ Market Regimes          │
+                    │ Backtests               │
+                    │ Alerts                  │
+                    └─────────────────────────┘
+
+                    DATA SOURCES
+                         │
+          ┌──────────────┼───────────────┐
+          ▼              ▼               ▼
+       NSE/Data       Fundamentals     News/events
+```
+
+The critical principle is:
+
+> **Data → Analysis → Decision → Recommendation → Tracking → Re-analysis → Exit/Continue**
+
+Not:
+
+> Data → AI → BUY.
+
+---
+
+# 2. Universe of stocks
+
+Your first version should cover:
+
+### Large-cap
+
+**Nifty 50**
+
+### Mid-cap
+
+**Nifty Midcap 150**
+
+### Small-cap
+
+**Nifty Smallcap 250**
+
+So the system potentially evaluates roughly **450 stocks**.
+
+But don't hard-code the universe permanently.
+
+The database should store:
+
+```text
+Index
+ ├── NIFTY50
+ ├── NIFTYMIDCAP150
+ └── NIFTYSMALLCAP250
+```
+
+with historical membership.
+
+That's important because index constituents change.
+
+For example:
+
+```text
+Stock A
+
+2025:
+Nifty Midcap 150
+
+2026:
+Nifty 50
+```
+
+The system needs to know what universe the stock belonged to **at that point in history**, especially during backtesting.
+
+---
+
+# 3. Core feature architecture
+
+I'd divide the analysis engine into **10 major analysis modules**.
+
+```text
+                 STOCK
+                   │
+     ┌─────────────┼──────────────┐
+     │             │              │
+     ▼             ▼              ▼
+Technical      Fundamental     Valuation
+     │             │              │
+     └─────────────┼──────────────┘
+                   │
+                   ▼
+              Momentum
+                   │
+                   ▼
+            Relative Strength
+                   │
+                   ▼
+              Volatility
+                   │
+                   ▼
+             Market Regime
+                   │
+                   ▼
+             Sector Analysis
+                   │
+                   ▼
+              Risk Analysis
+                   │
+                   ▼
+             Event Analysis
+                   │
+                   ▼
+             FINAL ANALYSIS
+```
+
+---
+
+# 4. Technical analysis module
+
+This should manually calculate and store indicators.
+
+Not simply call a library and forget about them.
+
+### Trend
+
+```text
+SMA 20
+SMA 50
+SMA 100
+SMA 200
+
+EMA 20
+EMA 50
+EMA 200
+```
+
+### Momentum
+
+```text
+RSI
+MACD
+ROC
+Stochastic
+Williams %R
+CCI
+ADX
+```
+
+### Volatility
+
+```text
+ATR
+Historical volatility
+Bollinger Bands
+Bollinger Band width
+Volatility percentile
+```
+
+### Volume
+
+```text
+Volume SMA
+Volume ratio
+OBV
+Volume breakout
+Price-volume relationship
+```
+
+### Price structure
+
+```text
+52-week high
+52-week low
+Distance from 52W high
+Distance from 52W low
+
+20D high
+50D high
+100D high
+200D high
+
+Drawdown
+Recovery from drawdown
+Breakout
+Breakdown
+```
+
+The application should store the **raw values**, not merely:
+
+```text
+RSI = Bullish
+```
+
+Store:
+
+```text
+RSI:
+57.42
+
+RSI percentile:
+63
+
+RSI interpretation:
+Moderately bullish
+```
+
+That makes your system auditable.
+
+---
+
+# 5. Fundamental analysis
+
+For each company:
+
+### Revenue
+
+```text
+Revenue
+Revenue growth YoY
+Revenue growth QoQ
+Revenue CAGR
+```
+
+### Profit
+
+```text
+Net profit
+EPS
+EPS growth
+EPS CAGR
+EBITDA
+EBITDA margin
+Net margin
+```
+
+### Efficiency
+
+```text
+ROE
+ROCE
+ROA
+Asset turnover
+```
+
+### Balance sheet
+
+```text
+Debt
+Debt/Equity
+Net debt
+Interest coverage
+Current ratio
+```
+
+### Cash flow
+
+```text
+Operating cash flow
+Free cash flow
+FCF growth
+OCF / Net profit
+```
+
+### Quality
+
+You can derive things such as:
+
+```text
+Earnings quality
+Cash conversion
+Debt trend
+Margin stability
+Profit consistency
+```
+
+---
+
+# 6. Valuation engine
+
+Don't simply say:
+
+> P/E = 20 → expensive.
+
+Instead analyze valuation in multiple dimensions.
+
+```text
+Current P/E
+Historical P/E
+5Y median P/E
+10Y median P/E
+P/E percentile
+
+Current P/B
+Historical P/B
+
+EV/EBITDA
+
+PEG
+
+Dividend yield
+
+FCF yield
+```
+
+And compare:
+
+```text
+Company
+    ↓
+Sector
+    ↓
+Index
+    ↓
+Historical valuation
+```
+
+So the application might conclude:
+
+```text
+Valuation Status:
+Moderately expensive
+
+Reason:
+Current P/E is above its historical median
+but earnings growth remains elevated.
+```
+
+That's far more useful.
+
+---
+
+# 7. Relative-strength engine
+
+This should compare every stock against:
+
+```text
+Nifty 50
+Nifty Midcap 150
+Nifty Smallcap 250
+Sector index
+```
+
+depending on the stock.
+
+Calculate:
+
+```text
+1M relative performance
+3M relative performance
+6M relative performance
+12M relative performance
+```
+
+For example:
+
+```text
+Stock:
++28% 12M
+
+Benchmark:
++15%
+
+Relative:
++13%
+```
+
+Then track whether relative strength is:
+
+```text
+Improving
+Stable
+Deteriorating
+```
+
+---
+
+# 8. Market-regime engine
+
+This is essential.
+
+Your system should determine the current market environment.
+
+Something like:
+
+```text
+                 MARKET REGIME
+
+              ┌──────────────┐
+              │   STRONG     │
+              │    BULL      │
+              └──────┬───────┘
+                     │
+              ┌──────▼───────┐
+              │     BULL     │
+              └──────┬───────┘
+                     │
+              ┌──────▼───────┐
+              │   NEUTRAL    │
+              └──────┬───────┘
+                     │
+              ┌──────▼───────┐
+              │     BEAR     │
+              └──────┬───────┘
+                     │
+              ┌──────▼───────┐
+              │   STRONG     │
+              │    BEAR      │
+              └──────────────┘
+```
+
+It can consider:
+
+```text
+Nifty trend
+Nifty volatility
+Market breadth
+Advance/Decline
+% stocks above 50 DMA
+% stocks above 200 DMA
+Sector participation
+Index momentum
+Drawdown
+Volatility regime
+```
+
+Then the stock engine knows the environment in which its signal exists.
+
+---
+
+# 9. Short-term vs long-term classification
+
+This should **not** be one universal prediction.
+
+The system should generate different investment horizons.
+
+### Short term
+
+```text
+Days → Weeks
+```
+
+Primarily:
+
+```text
+Technical
+Momentum
+Volume
+Volatility
+Market regime
+Events
+```
+
+### Swing / medium term
+
+```text
+Weeks → Months
+```
+
+Combination of:
+
+```text
+Technical
+Momentum
+Fundamental
+Valuation
+Sector
+Market regime
+```
+
+### Long term
+
+```text
+6 months → Several years
+```
+
+Primarily:
+
+```text
+Fundamentals
+Growth
+Valuation
+Cash flow
+Competitive characteristics
+Sector
+Management-related data where available
+Market regime
+```
+
+Your system should therefore produce something like:
+
+```text
+Investment Horizon
+------------------
+Short-term:    Weak
+Medium-term:   Strong
+Long-term:     Strong
+```
+
+and then:
+
+```text
+Recommended holding period:
+6–18 months
+```
+
+**Important:** that holding period should be generated from your tested strategy/rules, not invented by the UI.
+
+---
+
+# 10. Recommendation lifecycle
+
+This is one of the most important pieces of the entire application.
+
+Every recommendation becomes a **tracked object**.
+
+For example:
+
+```text
+Recommendation #1842
+
+Stock:
+Company XYZ
+
+Created:
+24 Sep 2026
+
+Entry:
+₹1,420–₹1,460
+
+Current:
+₹1,438
+
+Strategy:
+Medium-term momentum + fundamental
+
+Expected horizon:
+6–12 months
+
+Initial thesis:
+...
+
+Status:
+ACTIVE
+```
+
+Then every day:
+
+```text
+Market data arrives
+       ↓
+Recalculate indicators
+       ↓
+Compare against original thesis
+       ↓
+Detect changes
+       ↓
+Update recommendation
+       ↓
+Notify user if required
+```
+
+---
+
+# 11. Change detection
+
+This is where your app becomes genuinely useful.
+
+Suppose:
+
+```text
+24 Sep
+
+Recommendation:
+BUY / ACTIVE
+```
+
+Two months later:
+
+```text
+Revenue growth ↓
+EPS growth ↓
+Relative strength ↓
+Price < 200 DMA
+Sector weakness ↑
+```
+
+The system shouldn't silently keep the old recommendation.
+
+It should say:
+
+> **Recommendation changed**
+
+and explain exactly why.
+
+For example:
+
+```text
+⚠ Thesis deterioration detected
+
+Company:
+XYZ
+
+Previous status:
+HOLD
+
+Current status:
+EXIT REVIEW
+
+Changes:
+
+EPS growth:
++18% → +7%
+
+Relative strength:
+Strong → Weak
+
+Price:
+Above 200 DMA → Below 200 DMA
+
+Sector:
+Positive → Negative
+
+Reason:
+Multiple independent conditions that supported
+the original thesis have deteriorated.
+```
+
+That is the feature I'd consider the **killer feature**.
+
+---
+
+# 12. Exit engine
+
+You should have several independent exit mechanisms.
+
+### Thesis exit
+
+Fundamentals changed.
+
+### Technical exit
+
+Trend invalidated.
+
+### Risk exit
+
+Maximum predefined loss/drawdown reached.
+
+### Valuation exit
+
+Stock becomes significantly overvalued according to the strategy.
+
+### Target review
+
+The price reaches a predefined target zone.
+
+### Time exit
+
+The expected holding period expires without the thesis developing.
+
+### Event exit
+
+Major corporate event materially changes the thesis.
+
+Therefore:
+
+```text
+ENTRY
+  ↓
+ACTIVE
+  ↓
+MONITOR
+  ├── Thesis intact → HOLD
+  ├── Target reached → REVIEW
+  ├── Thesis weakening → WARNING
+  ├── Thesis invalidated → EXIT
+  └── Time expired → RE-EVALUATE
+```
+
+---
+
+# 13. Database architecture
+
+For your requirements, I would **not use SQLite as the final database**.
+
+Use:
+
+> **PostgreSQL**
+
+because you will eventually have:
+
+* millions of price records
+* thousands of calculated indicators
+* historical fundamentals
+* recommendations
+* backtests
+* alerts
+* portfolio tracking
+* users
+* audit history
+
+A simplified database:
+
+```text
+users
+│
+├── portfolios
+│
+├── watchlists
+│
+└── notifications
+
+
+companies
+│
+├── instruments
+├── sectors
+├── industries
+└── index_memberships
+
+
+market_data
+│
+├── daily_prices
+├── intraday_prices
+├── volumes
+├── corporate_actions
+└── market_indices
+
+
+fundamentals
+│
+├── income_statements
+├── balance_sheets
+├── cash_flows
+├── ratios
+└── earnings
+
+
+analysis
+│
+├── technical_indicators
+├── valuation_metrics
+├── momentum_metrics
+├── relative_strength
+├── volatility_metrics
+├── market_regimes
+└── sector_analysis
+
+
+recommendations
+│
+├── recommendation
+├── recommendation_scores
+├── recommendation_reasons
+├── entry_conditions
+├── exit_conditions
+├── recommendation_history
+└── thesis_changes
+
+
+portfolio
+│
+├── positions
+├── transactions
+├── holdings
+└── performance
+
+
+alerts
+│
+├── alert_rules
+├── triggered_alerts
+└── notification_history
+
+
+backtesting
+│
+├── strategies
+├── strategy_parameters
+├── backtest_runs
+├── trades
+└── performance_metrics
+```
+
+---
+
+# 14. Don't store only the latest analysis
+
+This is critical.
+
+Bad:
+
+```text
+stock:
+XYZ
+
+score:
+82
+```
+
+Good:
+
+```text
+XYZ
+
+24 Sep:
+82
+
+25 Sep:
+80
+
+26 Sep:
+78
+
+27 Sep:
+73
+```
+
+You need **time-series analysis history**.
+
+Otherwise you can't answer:
+
+> "Why did the application change its recommendation?"
+
+---
+
+# 15. Recommendation database
+
+I'd make this particularly detailed.
+
+Something like:
+
+```text
+recommendation
+----------------
+id
+stock_id
+strategy_id
+created_at
+updated_at
+
+recommendation_type
+horizon
+
+entry_price_low
+entry_price_high
+
+current_price
+
+target_low
+target_high
+
+risk_level
+invalidation_price
+
+expected_holding_days
+
+confidence_score
+
+technical_score
+fundamental_score
+valuation_score
+momentum_score
+relative_strength_score
+market_regime_score
+risk_score
+
+status
+
+thesis
+
+created_reason
+
+last_reviewed_at
+
+closed_at
+
+exit_reason
+```
+
+Then a separate:
+
+```text
+recommendation_events
+```
+
+could contain:
+
+```text
+BUY_SIGNAL_CREATED
+
+ENTRY_ZONE_REACHED
+
+THESIS_IMPROVED
+
+THESIS_WEAKENED
+
+TARGET_REACHED
+
+RISK_TRIGGERED
+
+EXIT_SIGNAL
+
+RECOMMENDATION_CLOSED
+```
+
+This gives you a complete audit trail.
+
+---
+
+# 16. Data pipeline
+
+I'd build the system around scheduled jobs.
+
+```text
+                    MARKET CLOSE
+                         │
+                         ▼
+                 Download new data
+                         │
+                         ▼
+                  Validate data
+                         │
+                         ▼
+               Adjust corporate actions
+                         │
+                         ▼
+              Update historical prices
+                         │
+                         ▼
+             Calculate indicators
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+      Technical     Fundamental      Valuation
+          │              │              │
+          └──────────────┼──────────────┘
+                         ▼
+                  Market analysis
+                         │
+                         ▼
+                  Signal generation
+                         │
+                         ▼
+               Existing positions?
+                    /          \
+                  YES           NO
+                   │             │
+                   ▼             ▼
+             Re-evaluate       New signal
+             thesis             detection
+                   │             │
+                   └──────┬──────┘
+                          ▼
+                   Alert engine
+                          │
+                          ▼
+                    User notification
+```
+
+---
+
+# 17. Manual analysis mode
+
+Your requirement that the application should **manually check all statistics and indicators** is important.
+
+I would make two modes.
+
+### Automatic scan
+
+The system scans all ~450 stocks.
+
+```text
+Nifty 50
+Midcap 150
+Smallcap 250
+       ↓
+Analyse
+       ↓
+Rank/filter
+       ↓
+Potential setups
+```
+
+### Deep analysis
+
+User selects:
+
+> RELIANCE
+
+Then the application runs a complete analysis.
+
+```text
+Overview
+
+Price
+
+Technical
+
+Fundamentals
+
+Valuation
+
+Momentum
+
+Relative Strength
+
+Sector
+
+Market Regime
+
+Risk
+
+Historical Behaviour
+
+Current Recommendation
+
+Expected Holding Period
+
+Entry Conditions
+
+Exit Conditions
+
+Thesis
+
+Changes Since Last Analysis
+```
+
+This gives you both **screening** and **research**.
+
+---
+
+# 18. Don't hide the reasoning behind a single score
+
+You can have:
+
+```text
+Overall Score: 81
+```
+
+but never stop there.
+
+Show:
+
+```text
+Technical        84
+Fundamental      91
+Valuation        67
+Momentum         86
+Relative Strength 89
+Risk             72
+Market Regime    78
+```
+
+Then explain:
+
+> Strong fundamentals and momentum, but valuation is comparatively stretched.
+
+This makes the system much easier to trust and debug.
+
+---
+
+# 19. AI should sit on top of the analytical engine
+
+Eventually:
+
+```text
+                Quantitative Engine
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+       Technical   Fundamental   Valuation
+          │            │            │
+          └────────────┼────────────┘
+                       ▼
+                 Recommendation
+                       │
+                       ▼
+                   AI Layer
+                       │
+                       ▼
+             Human-readable explanation
+```
+
+AI should explain the numbers.
+
+It should **not invent the numbers**.
+
+For example:
+
+```text
+Database:
+RSI = 62.4
+P/E percentile = 78
+ROCE = 24%
+Relative strength = +11%
+```
+
+AI:
+
+> "Momentum remains positive, while the stock is trading at a relatively elevated valuation compared with its historical range."
+
+That's useful.
+
+---
+
+# 20. Backtesting must be isolated from live recommendations
+
+You need:
+
+```text
+Historical data
+      ↓
+Strategy
+      ↓
+Backtest
+      ↓
+Performance
+```
+
+and separately:
+
+```text
+Live data
+      ↓
+Production strategy
+      ↓
+Current recommendation
+```
+
+Never allow future information to leak into historical testing.
+
+Otherwise you'll get **look-ahead bias** and false performance.
+
+---
+
+# 21. The project structure I'd eventually use
+
+Since you're comfortable with Python/FastAPI, I'd make the backend something like:
+
+```text
+stock-intelligence/
+│
+├── backend/
+│   ├── api/
+│   ├── services/
+│   ├── models/
+│   ├── repositories/
+│   ├── analysis/
+│   │   ├── technical/
+│   │   ├── fundamental/
+│   │   ├── valuation/
+│   │   ├── momentum/
+│   │   ├── relative_strength/
+│   │   ├── volatility/
+│   │   ├── market_regime/
+│   │   ├── sector/
+│   │   └── risk/
+│   │
+│   ├── strategies/
+│   ├── backtesting/
+│   ├── notifications/
+│   ├── data_ingestion/
+│   └── scheduler/
+│
+├── frontend/
+│
+├── database/
+│   ├── migrations/
+│   └── seeds/
+│
+├── tests/
+│
+├── configs/
+│
+└── docs/
+```
+
+---
+
+# 22. MVP → Advanced version
+
+Don't attempt all of this on day one.
+
+### Phase 1 — Data foundation
+
+```text
+Nifty 50
+Historical OHLCV
+PostgreSQL
+Company metadata
+Index membership
+```
+
+### Phase 2 — Technical engine
+
+```text
+MA
+EMA
+RSI
+MACD
+ATR
+ADX
+Bollinger
+Volume
+Drawdown
+Momentum
+```
+
+### Phase 3 — Fundamental engine
+
+```text
+Revenue
+Profit
+EPS
+ROE
+ROCE
+Debt
+Cash flow
+Margins
+Growth
+```
+
+### Phase 4 — Scoring
+
+```text
+Technical
+Fundamental
+Valuation
+Momentum
+Risk
+Relative strength
+```
+
+### Phase 5 — Recommendations
+
+```text
+Watch
+Potential Entry
+Entry
+Hold
+Warning
+Exit
+```
+
+### Phase 6 — Tracking
+
+```text
+Recommendation created
+       ↓
+Daily monitoring
+       ↓
+Thesis changes
+       ↓
+Alerts
+       ↓
+Exit
+```
+
+### Phase 7 — Midcap + Smallcap
+
+Add:
+
+```text
+Nifty Midcap 150
+Nifty Smallcap 250
+```
+
+### Phase 8 — Backtesting
+
+Test every strategy against historical data.
+
+### Phase 9 — AI explanation
+
+Only after the quantitative engine works.
+
+### Phase 10 — ML
+
+Potentially:
+
+```text
+classification
+ranking
+probability estimation
+regime detection
+anomaly detection
+```
+
+But only if backtesting demonstrates that it adds value after transaction costs and realistic execution assumptions.
+
+---
+
+# 23. The complete project prompt
+
+Here is the prompt I'd use as the **master specification prompt** when you start generating the actual project architecture/code/documentation.
+
+# Nifty Market Intelligence & Stock Analysis Platform
+
+## 1. Project Objective
+
+Build a production-oriented stock market intelligence and decision-support application focused initially on the Indian equity market.
+
+The system should continuously analyze stocks from:
+
+* Nifty 50
+* Nifty Midcap 150
+* Nifty Smallcap 250
+
+using historical and current market data, technical indicators, fundamental statistics, valuation metrics, momentum, relative strength, volatility, sector conditions, market-regime analysis, risk factors, and relevant corporate events.
+
+The system must not simply generate a "BUY" or "SELL" label.
+
+For every potential investment setup, it must provide:
+
+* Current analysis
+* Investment horizon
+* Expected holding period
+* Entry conditions
+* Risk/invalidation conditions
+* Potential exit conditions
+* Reasons behind the recommendation
+* Individual component scores
+* Historical behaviour of the strategy
+* Continuous monitoring after recommendation
+* Automatic detection of changes in the original investment thesis
+* Notifications when significant changes occur
+
+The system must be explainable and auditable. Every recommendation should be traceable to the underlying data, indicators, rules, strategy version, and analysis that produced it.
+
+The system is a decision-support and research platform, not a guarantee of future returns.
+
+---
+
+# 2. Core Architecture
+
+Use the following high-level architecture:
+
+Market Data Sources
+↓
+Data Ingestion Layer
+↓
+Data Validation & Normalization
+↓
+PostgreSQL Database
+↓
+Feature / Indicator Calculation Engine
+↓
+Analysis Engines
+↓
+Market Regime Engine
+↓
+Strategy / Signal Engine
+↓
+Recommendation Engine
+↓
+Recommendation Tracking Engine
+↓
+Change / Exit Detection Engine
+↓
+Notification Engine
+↓
+API Backend
+↓
+Web/Mobile Dashboard
+
+The architecture must separate:
+
+1. Raw market data
+2. Derived indicators
+3. Fundamental data
+4. Analysis results
+5. Strategy logic
+6. Recommendations
+7. Recommendation history
+8. User portfolio data
+9. Notifications
+10. Backtesting results
+
+Do not mix these responsibilities.
+
+---
+
+# 3. Supported Market Universe
+
+Initially support:
+
+* Nifty 50
+* Nifty Midcap 150
+* Nifty Smallcap 250
+
+The system must maintain historical index membership.
+
+Do not assume that the current index constituents were always members of the index.
+
+Index membership must therefore be stored with effective dates.
+
+Example:
+
+Stock X
+
+* Midcap 150: 2024-01-01 → 2025-06-30
+* Nifty 50: 2025-07-01 → present
+
+This is required for accurate historical analysis and backtesting.
+
+---
+
+# 4. Market Data Layer
+
+Store and process:
+
+## Price Data
+
+* Open
+* High
+* Low
+* Close
+* Adjusted close where applicable
+* Volume
+* Trading value
+* Date/time
+
+Support daily data initially.
+
+Design the architecture so intraday data can be added later.
+
+## Corporate Actions
+
+Track:
+
+* Stock splits
+* Bonus issues
+* Dividends
+* Rights issues
+* Mergers
+* Demergers
+* Other relevant corporate actions
+
+Ensure historical price calculations correctly account for applicable corporate actions.
+
+---
+
+# 5. Fundamental Analysis Engine
+
+For each company calculate and maintain historical fundamental information.
+
+## Revenue
+
+* Revenue
+* Revenue growth YoY
+* Revenue growth QoQ
+* Revenue CAGR
+
+## Profitability
+
+* Net profit
+* EPS
+* EPS growth
+* EBITDA
+* EBITDA growth
+* EBITDA margin
+* Net margin
+
+## Efficiency
+
+* ROE
+* ROCE
+* ROA
+
+## Balance Sheet
+
+* Total debt
+* Net debt
+* Debt/equity
+* Interest coverage
+* Current ratio
+
+## Cash Flow
+
+* Operating cash flow
+* Free cash flow
+* OCF/net profit
+* FCF growth
+
+## Quality Analysis
+
+Calculate derived measures for:
+
+* Earnings quality
+* Cash conversion
+* Margin stability
+* Profit consistency
+* Debt trend
+* Growth consistency
+
+Store both raw values and calculated historical metrics.
+
+---
+
+# 6. Technical Analysis Engine
+
+Calculate and store historical technical indicators.
+
+## Moving Averages
+
+* SMA 20
+* SMA 50
+* SMA 100
+* SMA 200
+* EMA 20
+* EMA 50
+* EMA 200
+
+## Momentum
+
+* RSI
+* MACD
+* ROC
+* Stochastic
+* Williams %R
+* CCI
+* ADX
+
+## Volatility
+
+* ATR
+* Historical volatility
+* Bollinger Bands
+* Bollinger Band width
+* Volatility percentile
+
+## Volume
+
+* Volume SMA
+* Volume ratio
+* Volume spikes
+* OBV
+* Price-volume relationships
+
+## Price Structure
+
+Calculate:
+
+* 52-week high
+* 52-week low
+* Distance from 52-week high
+* Distance from 52-week low
+* Drawdown
+* Recovery from drawdown
+* Breakouts
+* Breakdowns
+* Trend state
+
+Never store only interpretations such as "bullish".
+
+Store the actual numerical indicator values as well.
+
+---
+
+# 7. Valuation Engine
+
+Analyze:
+
+* P/E
+* P/B
+* EV/EBITDA
+* PEG
+* Dividend yield
+* FCF yield
+
+Compare current valuation against:
+
+1. Company's own historical valuation
+2. Sector valuation
+3. Relevant index valuation
+
+Calculate:
+
+* Historical median
+* Historical percentile
+* Current deviation from historical valuation
+* Sector-relative valuation
+
+The system should distinguish between:
+
+* Cheap
+* Fairly valued
+* Moderately expensive
+* Expensive
+
+based on explicit, configurable rules rather than arbitrary AI-generated opinions.
+
+---
+
+# 8. Momentum and Relative Strength Engine
+
+Calculate stock performance over:
+
+* 1 month
+* 3 months
+* 6 months
+* 12 months
+
+Compare performance against:
+
+* Nifty 50
+* Nifty Midcap 150
+* Nifty Smallcap 250
+* Relevant sector index
+
+Calculate relative strength and determine whether it is:
+
+* Improving
+* Stable
+* Deteriorating
+
+---
+
+# 9. Market Regime Engine
+
+Create a market-regime model.
+
+Possible regimes:
+
+* Strong Bull
+* Bull
+* Neutral
+* Bear
+* Strong Bear
+
+Use configurable factors such as:
+
+* Nifty trend
+* Moving averages
+* Market breadth
+* Advance/Decline
+* Percentage of stocks above 50 DMA
+* Percentage of stocks above 200 DMA
+* Index momentum
+* Volatility
+* Drawdown
+* Sector participation
+
+The market regime should influence strategy sensitivity and recommendation confidence.
+
+---
+
+# 10. Sector Analysis
+
+For every stock determine its sector and industry.
+
+Analyze:
+
+* Sector momentum
+* Sector relative strength
+* Sector valuation
+* Sector trend
+* Sector market regime
+* Stock performance versus sector
+* Stock performance versus benchmark
+
+A stock should not be evaluated independently of its sector.
+
+---
+
+# 11. Investment Horizon Engine
+
+Every recommendation must explicitly identify its intended horizon.
+
+Supported horizons:
+
+### Short Term
+
+Days to several weeks.
+
+Primarily evaluate:
+
+* Technical indicators
+* Momentum
+* Volume
+* Volatility
+* Market regime
+* Events
+
+### Medium Term
+
+Several weeks to several months.
+
+Evaluate:
+
+* Technical
+* Momentum
+* Fundamentals
+* Valuation
+* Sector
+* Market regime
+* Relative strength
+
+### Long Term
+
+Approximately six months to multiple years.
+
+Primarily evaluate:
+
+* Fundamental growth
+* Earnings
+* Cash flow
+* Balance sheet
+* Valuation
+* Sector
+* Relative strength
+* Market regime
+
+The system must provide an estimated holding-period range based on the selected strategy.
+
+Do not present the holding period as a guaranteed outcome.
+
+---
+
+# 12. Scoring Engine
+
+Create independent component scores.
+
+Example:
+
+* Technical score
+* Fundamental score
+* Valuation score
+* Momentum score
+* Relative-strength score
+* Sector score
+* Market-regime score
+* Risk score
+
+Then calculate an overall strategy score using configurable weights.
+
+The weights must be stored as strategy parameters.
+
+Do not hard-code the weights throughout the application.
+
+Every recommendation must store the exact strategy version and parameters used to generate it.
+
+---
+
+# 13. Recommendation States
+
+Use a lifecycle rather than a simple BUY/SELL flag.
+
+Possible states:
+
+* WATCH
+* POTENTIAL_ENTRY
+* ENTRY
+* HOLD
+* THESIS_WEAKENING
+* EXIT_REVIEW
+* EXIT
+* CLOSED
+
+Each recommendation must contain:
+
+* Stock
+* Strategy
+* Created time
+* Updated time
+* Investment horizon
+* Expected holding period
+* Entry zone
+* Current price
+* Target/review zones
+* Risk/invalidation level
+* Component scores
+* Overall score
+* Confidence
+* Thesis
+* Reasons
+* Conditions that invalidate the thesis
+
+---
+
+# 14. Recommendation Tracking
+
+Once a recommendation is generated, it must become a tracked object.
+
+Example lifecycle:
+
+Recommendation created
+↓
+Entry condition reached
+↓
+Position becomes active
+↓
+Daily/periodic monitoring
+↓
+Recalculate analysis
+↓
+Compare current state against original thesis
+↓
+Detect changes
+↓
+Update recommendation
+↓
+Notify user when appropriate
+↓
+Hold / Review / Exit
+↓
+Close recommendation
+↓
+Store final result
+
+Never overwrite the original recommendation.
+
+Maintain complete historical versions.
+
+---
+
+# 15. Thesis Monitoring Engine
+
+For every active recommendation, continuously monitor the factors that originally justified it.
+
+Example:
+
+Original thesis:
+
+* Strong earnings growth
+* Positive relative strength
+* Price above 200 DMA
+* Attractive valuation
+* Positive sector trend
+
+Later:
+
+* Earnings growth deteriorates
+* Relative strength weakens
+* Price falls below 200 DMA
+
+The system must detect this.
+
+Example output:
+
+THESIS WEAKENING
+
+Previous state:
+HOLD
+
+Current state:
+EXIT REVIEW
+
+Changes detected:
+
+EPS growth:
+18% → 7%
+
+Relative strength:
+Strong → Weak
+
+Trend:
+Above 200 DMA → Below 200 DMA
+
+Sector:
+Positive → Negative
+
+Explain exactly which conditions changed.
+
+---
+
+# 16. Exit Engine
+
+Support multiple exit mechanisms.
+
+## Technical Exit
+
+Trend invalidation.
+
+## Fundamental Exit
+
+Material deterioration in business fundamentals.
+
+## Valuation Exit
+
+Valuation reaches a strategy-defined extreme.
+
+## Risk Exit
+
+Risk/invalidation threshold is breached.
+
+## Target Review
+
+Price reaches a predefined target/review zone.
+
+## Time Exit
+
+Expected holding period expires without sufficient thesis development.
+
+## Event Exit
+
+A major corporate event materially changes the investment thesis.
+
+The application should explain why an exit condition was triggered.
+
+---
+
+# 17. Notification Engine
+
+Support notifications for:
+
+* New recommendation
+* Entry zone reached
+* Recommendation upgraded
+* Recommendation downgraded
+* Thesis weakening
+* Major fundamental change
+* Major technical change
+* Target/review zone reached
+* Risk condition triggered
+* Exit condition triggered
+* Market regime change
+
+Notifications must contain the reason for the alert.
+
+Do not send unexplained "BUY" or "SELL" notifications.
+
+---
+
+# 18. Database Architecture
+
+Use PostgreSQL as the primary relational database.
+
+Major entities:
+
+users
+
+companies
+
+instruments
+
+sectors
+
+industries
+
+indices
+
+index_memberships
+
+daily_prices
+
+intraday_prices
+
+corporate_actions
+
+income_statements
+
+balance_sheets
+
+cash_flows
+
+fundamental_metrics
+
+technical_indicators
+
+valuation_metrics
+
+momentum_metrics
+
+relative_strength_metrics
+
+market_regimes
+
+sector_analysis
+
+strategies
+
+strategy_parameters
+
+recommendations
+
+recommendation_scores
+
+recommendation_reasons
+
+recommendation_events
+
+recommendation_versions
+
+positions
+
+transactions
+
+portfolios
+
+alerts
+
+notification_history
+
+backtest_strategies
+
+backtest_runs
+
+backtest_trades
+
+backtest_metrics
+
+Every time-series entity must contain appropriate dates/timestamps.
+
+Do not overwrite historical analytical data unnecessarily.
+
+---
+
+# 19. Historical Data Requirement
+
+The system must preserve historical analysis.
+
+For example:
+
+24 Sep:
+Technical score = 82
+
+25 Sep:
+Technical score = 80
+
+26 Sep:
+Technical score = 76
+
+27 Sep:
+Technical score = 69
+
+This allows the system to explain how and why a recommendation changed.
+
+---
+
+# 20. Backtesting Engine
+
+Every strategy must be independently backtestable.
+
+The backtesting system must support:
+
+* Historical prices
+* Historical fundamentals
+* Historical index membership
+* Historical strategy parameters
+* Entry rules
+* Exit rules
+* Holding periods
+* Transaction costs
+* Slippage assumptions
+* Position sizing
+* Risk management
+
+Calculate:
+
+* CAGR
+* Total return
+* Maximum drawdown
+* Sharpe ratio
+* Sortino ratio
+* Win rate
+* Average winning trade
+* Average losing trade
+* Profit factor
+* Number of trades
+* Average holding period
+* Turnover
+
+Prevent:
+
+* Look-ahead bias
+* Survivorship bias
+* Data leakage
+
+Backtest results must be kept separate from live recommendations.
+
+---
+
+# 21. AI Layer
+
+AI should not be the primary numerical analysis engine.
+
+The quantitative engines calculate the actual metrics.
+
+AI should consume verified structured data and generate:
+
+* Human-readable explanations
+* Summary of the thesis
+* Explanation of changes
+* Comparison of current versus historical state
+* Natural-language research summaries
+
+AI must never invent financial metrics.
+
+Every AI-generated statement about a stock should be traceable to underlying structured data where possible.
+
+---
+
+# 22. User Dashboard
+
+The dashboard should include:
+
+## Market Overview
+
+* Nifty 50
+* Midcap 150
+* Smallcap 250
+* Current market regime
+* Market breadth
+* Sector performance
+* Volatility
+
+## Stock Screener
+
+Filters:
+
+* Index
+* Sector
+* Market cap
+* Technical score
+* Fundamental score
+* Valuation
+* Momentum
+* Relative strength
+* Risk
+* Investment horizon
+* Recommendation state
+
+## Stock Detail Page
+
+Sections:
+
+* Price chart
+* Technical analysis
+* Fundamentals
+* Valuation
+* Momentum
+* Relative strength
+* Sector
+* Market regime
+* Risk
+* Historical analysis
+* Current recommendation
+* Entry conditions
+* Exit conditions
+* Thesis
+* Changes since recommendation
+
+## Recommendation Dashboard
+
+Show:
+
+* Active recommendations
+* Watchlist setups
+* Entry opportunities
+* Weakening theses
+* Exit reviews
+* Closed recommendations
+
+---
+
+# 23. Reliability Requirements
+
+The system must be designed around unreliable real-world data.
+
+Implement:
+
+* Data validation
+* Missing-data detection
+* Duplicate detection
+* Outlier detection
+* Source timestamps
+* Data-source tracking
+* Calculation versioning
+* Strategy versioning
+* Audit logs
+* Failed-job logging
+* Retry mechanisms
+* Health checks
+
+Never silently calculate an indicator from incomplete data.
+
+Flag incomplete analysis.
+
+---
+
+# 24. Engineering Principles
+
+Use:
+
+* Python
+* FastAPI
+* PostgreSQL
+* SQLAlchemy
+* Pydantic
+* Background job/scheduler system
+* Redis where appropriate
+* React/Next.js frontend
+
+Keep the analysis engine independent from the API layer.
+
+Keep data ingestion independent from analysis.
+
+Keep strategy logic independent from presentation.
+
+Keep backtesting isolated from live execution.
+
+Use unit tests for every indicator and strategy component.
+
+Use integration tests for the complete pipeline.
+
+---
+
+# 25. Core Design Principle
+
+The final system must follow this lifecycle:
+
+DATA
+↓
+VALIDATE
+↓
+STORE
+↓
+CALCULATE
+↓
+ANALYZE
+↓
+COMPARE
+↓
+SCORE
+↓
+GENERATE THESIS
+↓
+CREATE RECOMMENDATION
+↓
+TRACK
+↓
+RE-EVALUATE
+↓
+DETECT CHANGE
+↓
+NOTIFY
+↓
+HOLD / REVIEW / EXIT
+↓
+RECORD RESULT
+
+Every recommendation must be explainable.
+
+Every recommendation must be historically auditable.
+
+Every strategy must be backtestable.
+
+Every important change must be detectable.
+
+No prediction should be represented as certainty.
+
+The system should optimize for transparency, reproducibility, data integrity, and useful decision support rather than simply generating frequent BUY/SELL signals.
+
+This gives you a **solid system specification before writing code**. The next thing I'd do is turn this into the **actual technical design**: PostgreSQL ER diagram/schema, API modules, Python package structure, background jobs, data pipeline, and the exact first MVP development sequence.
