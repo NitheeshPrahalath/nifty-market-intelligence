@@ -1,4 +1,5 @@
-"""Metrics engine (Phase 2) + analysis engines (Phase 3) + strategies (Phase 4).
+"""Metrics engine (Phase 2) + analysis engines (Phase 3) + strategies (Phase 4)
++ recommendation tracking, exit and notification engines (Phase 5).
 
 Orchestrates bulk runs with the same audit/traceability conventions as the
 ingestion layer: every job writes an ``ingestion_runs`` row and per-instrument
@@ -10,14 +11,15 @@ from __future__ import annotations
 import logging
 from bisect import bisect_right
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from nmi.analysis.common import as_float
+from nmi.analysis.common import as_float, round_or_none
 from nmi.analysis.horizon import compute_horizon_metrics
 from nmi.analysis.regime import compute_market_regime, index_return
 from nmi.analysis.scoring import DEFAULT_WEIGHTS, compute_scoring
@@ -31,6 +33,7 @@ from nmi.core.models import (
     CorporateAction,
     CorporateActionType,
     DailyPrice,
+    EventType,
     FundamentalMetric,
     HorizonMetric,
     IncomeStatement,
@@ -42,7 +45,10 @@ from nmi.core.models import (
     Instrument,
     MarketRegime,
     MomentumMetric,
+    Recommendation,
+    RecommendationEvent,
     RecommendationState,
+    RecommendationVersion,
     RelativeStrengthMetric,
     ScoringSnapshot,
     SectorMetric,
@@ -67,6 +73,30 @@ from nmi.strategies import (
     evaluate_strategy,
 )
 from nmi.strategies.rules import StrategyRules
+from nmi.tracking import (
+    DEFAULT_EXIT_POLICY,
+    TRACKING_VERSION,
+    ChangeDirection,
+    ExitAction,
+    ExitContext,
+    ExitMechanism,
+    ExitTrigger,
+    LifecycleDecision,
+    NotificationDraft,
+    ThesisAssessment,
+    ThesisChange,
+    ThesisSnapshot,
+    assessment_reason,
+    build_snapshot,
+    close_decision,
+    compare,
+    deduplicate,
+    evaluate_exits,
+    from_event,
+    new_recommendation_draft,
+    next_state,
+    regime_change_draft,
+)
 
 _TECHNICAL_FIELDS = (
     "sma20",
@@ -150,6 +180,54 @@ def _row_dict(row, fields: Sequence[str]) -> dict:
         value = getattr(row, field_name, None)
         out[field_name] = getattr(value, "value", value)
     return out
+
+
+def _parse_day(value) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _assessment_from_detail(detail: Mapping | None) -> ThesisAssessment | None:
+    """Rebuild a stored thesis assessment (event detail -> object)."""
+    if not detail:
+        return None
+    changes = tuple(
+        ThesisChange(
+            key=item.get("key", ""),
+            label=item.get("label", item.get("key", "")),
+            group=item.get("group", "score"),
+            before=item.get("before"),
+            after=item.get("after"),
+            direction=ChangeDirection(item.get("direction", "UNCHANGED")),
+            before_text=str(item.get("before_text", "n/a")),
+            after_text=str(item.get("after_text", "n/a")),
+        )
+        for item in detail.get("changes") or []
+    )
+    return ThesisAssessment(
+        baseline_as_of=_parse_day(detail.get("baseline_as_of")),
+        current_as_of=_parse_day(detail.get("current_as_of")),
+        changes=changes,
+    )
+
+
+def _triggers_from_detail(detail: Sequence | None) -> list[ExitTrigger]:
+    """Rebuild the exit triggers stored on an event."""
+    return [
+        ExitTrigger(
+            mechanism=ExitMechanism(item["mechanism"]),
+            action=ExitAction(item["action"]),
+            reason=item["reason"],
+            detail=item.get("detail") or {},
+        )
+        for item in (detail or [])
+    ]
 
 
 def _load_metric_rows(
@@ -1194,11 +1272,15 @@ class MetricsService:
             signals = store.get_signals_on(
                 self.session, as_of, [version.id for _s, version, _r in strategies]
             )
+            inputs = self._analysis_inputs(index_codes, None, as_of)
+            scoring_rows = self._scoring_map(inputs)
+            regime_rows = self._regime_map(inputs.start, as_of)
+            sector_states = self._sector_state_map(index_codes, inputs.start, as_of)
             for signal in signals:
                 pair = by_version.get(signal.strategy_version_id)
                 if pair is None:
                     continue
-                strategy, _version = pair
+                strategy, version = pair
                 if signal.state not in (
                     RecommendationState.WATCH,
                     RecommendationState.POTENTIAL_ENTRY,
@@ -1252,7 +1334,50 @@ class MetricsService:
                         "change_summary": "Initial recommendation",
                     },
                 )
+                ctx = self._recommendation_context(
+                    inputs,
+                    signal.instrument_id,
+                    as_of,
+                    scoring_rows,
+                    regime_rows,
+                    sector_states,
+                    index_codes,
+                )
+                self._store_baseline_snapshot(
+                    recommendation,
+                    as_of,
+                    ctx.values if ctx is not None else {},
+                    as_float(signal.price),
+                    as_float(signal.composite_score),
+                )
                 result.items_processed += 1
+                store.insert_recommendation_events(
+                    self.session,
+                    [
+                        {
+                            "recommendation_id": recommendation.id,
+                            "as_of": as_of,
+                            "event_type": EventType.RECOMMENDATION_CREATED.value,
+                            "mechanism": None,
+                            "previous_state": None,
+                            "new_state": signal.state.value,
+                            "title": f"Recommendation created for {strategy.code}",
+                            "message": signal.thesis,
+                            "detail": {
+                                "reasons": list(signal.reasons),
+                                "strategy_code": strategy.code,
+                                "strategy_version_id": version.id,
+                            },
+                            "recommendation_version": 1,
+                            "price": signal.price,
+                            "calc_version": self.calc_version,
+                            "dedupe_key": (
+                                f"rec{recommendation.id}:{as_of.isoformat()}:"
+                                f"{EventType.RECOMMENDATION_CREATED.value}:"
+                            ),
+                        }
+                    ],
+                )
                 result.per_symbol.append(
                     {
                         "instrument_id": signal.instrument_id,
@@ -1268,6 +1393,649 @@ class MetricsService:
             self._fail_run(run, result, exc)
             raise
 
+    # -------------------------------------- tracking, exits, alerts (Phase 5)
+    def _session_dates(self, inputs: _AnalysisInputs) -> dict[int, list[date]]:
+        dates: dict[int, list[date]] = defaultdict(list)
+        for instrument_id, as_of in inputs.technical:
+            dates[instrument_id].append(as_of)
+        return {instrument_id: sorted(values) for instrument_id, values in dates.items()}
+
+    def _symbol_map(self, instrument_ids: Sequence[int]) -> dict[int, str]:
+        if not instrument_ids:
+            return {}
+        rows = self.session.execute(
+            select(Instrument.id, Instrument.symbol).where(
+                Instrument.id.in_(list(instrument_ids))
+            )
+        ).all()
+        return {instrument_id: symbol for instrument_id, symbol in rows}
+
+    def _recommendation_context(
+        self,
+        inputs: _AnalysisInputs,
+        instrument_id: int,
+        as_of: date,
+        scoring_rows: dict,
+        regime_rows: dict,
+        sector_states: dict,
+        index_codes: Sequence[str],
+    ) -> StrategyContext | None:
+        """The strategy context for one instrument-day (same input as signals)."""
+        index_id = self._primary_index(instrument_id, as_of, index_codes, inputs)
+        sector_id = inputs.sector_by_instrument.get(instrument_id)
+        sector_state = sector_states.get((index_id, sector_id, as_of))
+        return self._signal_context(
+            inputs,
+            instrument_id,
+            as_of,
+            scoring_rows.get((instrument_id, as_of)),
+            regime_rows.get((index_id, as_of)) if index_id is not None else None,
+            {"sector_state": sector_state} if sector_state else None,
+        )
+
+    def _store_baseline_snapshot(
+        self,
+        recommendation: Recommendation,
+        as_of: date,
+        values: Mapping[str, Any] | None,
+        price: float | None,
+        composite_score: float | None = None,
+    ) -> None:
+        """Freeze the original thesis at creation time.
+
+        Written the moment the recommendation is made, from the same context
+        that produced the signal, so later reviews can never be compared
+        against reconstructed or drifted data.
+        """
+        snapshot = build_snapshot(as_of, values or {})
+        store.upsert_thesis_snapshots(
+            self.session,
+            [
+                {
+                    "recommendation_id": recommendation.id,
+                    "as_of": as_of,
+                    "state": RecommendationState(recommendation.state).value,
+                    "factors": snapshot.stored_factors(),
+                    "composite_score": (
+                        snapshot.number("composite_score")
+                        if composite_score is None
+                        else as_float(composite_score)
+                    ),
+                    "confidence": as_float(recommendation.confidence),
+                    "price": as_float(price),
+                    "weakened_count": 0,
+                    "improved_count": 0,
+                    "summary": "Original thesis",
+                }
+            ],
+        )
+
+    def _rebuild_baseline(
+        self,
+        recommendation: Recommendation,
+        as_of: date,
+        inputs: _AnalysisInputs,
+        index_codes: Sequence[str],
+        scoring_rows: dict,
+        regime_rows: dict,
+        sector_states: dict,
+        current: StrategyContext,
+    ) -> ThesisSnapshot | None:
+        """Rebuild a missing original thesis from its own day (legacy rows).
+
+        Returns ``None`` when that day can no longer be reconstructed, so the
+        caller can record the gap instead of comparing against invented data.
+        """
+        original_ctx = (
+            current
+            if recommendation.first_as_of == as_of
+            else self._recommendation_context(
+                inputs,
+                recommendation.instrument_id,
+                recommendation.first_as_of,
+                scoring_rows,
+                regime_rows,
+                sector_states,
+                index_codes,
+            )
+        )
+        if original_ctx is None:
+            return None
+        snapshot = build_snapshot(recommendation.first_as_of, original_ctx.values)
+        self._store_baseline_snapshot(
+            recommendation,
+            recommendation.first_as_of,
+            original_ctx.values,
+            as_float(original_ctx.close),
+        )
+        return snapshot
+
+    def track_recommendations(
+        self, index_codes: Sequence[str], as_of: date | None = None
+    ) -> JobResult:
+        """Re-evaluate every open recommendation against its original thesis.
+
+        For each recommendation and day this writes a thesis snapshot, the
+        change list versus the original thesis, whatever exit mechanisms fired
+        and — only when something actually changed — a new immutable
+        ``recommendation_versions`` row plus lifecycle events. Price levels in
+        the ``recommendations`` row stay frozen at the values the user was
+        given; per-day levels live in the version history.
+        """
+        run = self._start_run("track_recommendations", {"index_codes": list(index_codes)})
+        result = JobResult(
+            run_id=run.id, job_name="track_recommendations", status=RunStatus.RUNNING
+        )
+        try:
+            inputs = self._analysis_inputs(index_codes, None, as_of)
+            recommendations = store.get_tracked_recommendations(self.session)
+            if not recommendations:
+                self.session.commit()
+                self._finish_run(run, result)
+                return result
+            if as_of is None:
+                session_dates = self._session_dates(inputs)
+                if not session_dates:
+                    self.session.commit()
+                    self._finish_run(run, result)
+                    return result
+                as_of = max(max(values) for values in session_dates.values())
+            scoring_rows = self._scoring_map(inputs)
+            regime_rows = self._regime_map(inputs.start, as_of)
+            sector_states = self._sector_state_map(index_codes, inputs.start, as_of)
+            session_dates = self._session_dates(inputs)
+            signals = {
+                (signal.instrument_id, signal.strategy_version_id): signal
+                for signal in store.get_signals_on(self.session, as_of)
+            }
+
+            for recommendation in recommendations:
+                try:
+                    self._track_one(
+                        recommendation,
+                        as_of,
+                        inputs,
+                        index_codes,
+                        scoring_rows,
+                        regime_rows,
+                        sector_states,
+                        session_dates,
+                        signals,
+                        result,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    result.items_failed += 1
+                    self._record_error(
+                        run.id,
+                        "tracking",
+                        Severity.ERROR,
+                        "TRACKING_FAILED",
+                        (
+                            f"recommendation {recommendation.id}: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                        instrument_id=recommendation.instrument_id,
+                        trade_date=as_of,
+                    )
+                    self.session.rollback()
+            self.session.commit()
+            self._finish_run(run, result)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            self.session.rollback()
+            self._fail_run(run, result, exc)
+            raise
+
+    def _track_one(
+        self,
+        recommendation: Recommendation,
+        as_of: date,
+        inputs: _AnalysisInputs,
+        index_codes: Sequence[str],
+        scoring_rows: dict,
+        regime_rows: dict,
+        sector_states: dict,
+        session_dates: dict[int, list[date]],
+        signals: dict,
+        result: JobResult,
+    ) -> None:
+        """One recommendation, one day."""
+        instrument_id = recommendation.instrument_id
+        signal = signals.get((instrument_id, recommendation.strategy_version_id))
+        ctx = self._recommendation_context(
+            inputs, instrument_id, as_of, scoring_rows, regime_rows, sector_states, index_codes
+        )
+        if ctx is None:
+            # No metrics for this day: record the gap, change nothing.
+            if recommendation.last_as_of < as_of:
+                self._record_error(
+                    result.run_id,
+                    "tracking",
+                    Severity.INFO,
+                    "NO_DATA_FOR_DAY",
+                    f"recommendation {recommendation.id} not reviewed: no metrics for {as_of}",
+                    instrument_id=instrument_id,
+                    trade_date=as_of,
+                )
+                result.items_failed += 1
+            return
+
+        version = store.latest_recommendation_version(self.session, recommendation.id)
+        baseline_row = store.get_thesis_snapshot(
+            self.session, recommendation.id, recommendation.first_as_of
+        )
+        current = build_snapshot(as_of, ctx.values)
+        if baseline_row is not None:
+            baseline = ThesisSnapshot.from_stored(baseline_row.as_of, baseline_row.factors)
+        else:
+            baseline = self._rebuild_baseline(
+                recommendation,
+                as_of,
+                inputs,
+                index_codes,
+                scoring_rows,
+                regime_rows,
+                sector_states,
+                ctx,
+            )
+            if baseline is None:
+                # No honest baseline: report the gap and claim no change rather
+                # than measuring today's thesis against today's thesis.
+                self._record_error(
+                    result.run_id,
+                    "tracking",
+                    Severity.WARNING,
+                    "BASELINE_UNAVAILABLE",
+                    (
+                        f"recommendation {recommendation.id}: the thesis snapshot for "
+                        f"{recommendation.first_as_of} could not be rebuilt; change "
+                        "detection is disabled for this review"
+                    ),
+                    instrument_id=instrument_id,
+                    trade_date=as_of,
+                )
+                baseline = current
+        assessment = compare(baseline, current)
+
+        # A recommendation already in EXIT is closed on the next *new* review
+        # day, so the exit is always visible before the close. Re-running the
+        # same day must not close it (that would rewrite history).
+        reviewed_on = version.as_of if version is not None else None
+        if recommendation.state is RecommendationState.EXIT and (
+            reviewed_on is None or reviewed_on < as_of
+        ):
+            decision = close_decision(recommendation.state, as_of)
+            triggers: tuple = ()
+        else:
+            triggers = tuple(
+                self._exit_triggers(
+                    recommendation, ctx, signal, baseline, current, session_dates
+                )
+            )
+            decision = next_state(
+                recommendation.state,
+                RecommendationState(signal.state) if signal is not None else None,
+                assessment,
+                triggers,
+                min_weakened=DEFAULT_EXIT_POLICY.weaken_score_factors,
+                # Only a recommendation the user actually holds can be exited;
+                # one that was never entered is flagged for review instead.
+                active=recommendation.active_since is not None,
+            )
+
+        self._store_thesis_snapshot(recommendation, current, decision, as_of, ctx.close)
+        events = self._store_events(
+            recommendation, decision, as_of, ctx.close, assessment, triggers
+        )
+        if decision.changed:
+            self._apply_decision(recommendation, decision, as_of, signal, version)
+        # ``last_reviewed_at`` tracks the last review, while ``last_as_of`` only
+        # moves when something actually changed, so a no-op day is still visible.
+        recommendation.last_reviewed_at = datetime.utcnow()
+        self.session.flush()
+        result.items_processed += 1
+        result.per_symbol.append(
+            {
+                "instrument_id": instrument_id,
+                "recommendation_id": recommendation.id,
+                "state": recommendation.state.value,
+                "changed": decision.changed,
+                "events": [event["event_type"] for event in events],
+                "weakened": assessment.weakened_count,
+            }
+        )
+
+    def _exit_triggers(
+        self,
+        recommendation: Recommendation,
+        ctx: StrategyContext,
+        signal: Signal | None,
+        baseline: ThesisSnapshot,
+        current: ThesisSnapshot,
+        session_dates: dict[int, list[date]],
+    ) -> list[ExitTrigger]:
+        """Run every independent exit mechanism for one recommendation-day."""
+        active_since = recommendation.active_since or recommendation.first_as_of
+        dates = session_dates.get(recommendation.instrument_id, [])
+        held = sum(1 for day in dates if active_since <= day <= ctx.as_of)
+        entry_version = self.session.scalar(
+            select(RecommendationVersion)
+            .where(
+                RecommendationVersion.recommendation_id == recommendation.id,
+                RecommendationVersion.state == RecommendationState.ENTRY,
+            )
+            .order_by(RecommendationVersion.version)
+        )
+        actions = store.get_corporate_actions(
+            self.session, recommendation.instrument_id, recommendation.last_as_of, ctx.as_of
+        )
+        return evaluate_exits(
+            ExitContext(
+                as_of=ctx.as_of,
+                price=ctx.close,
+                values=ctx.values,
+                signal_state=RecommendationState(signal.state) if signal is not None else None,
+                signal_reasons=list(signal.reasons) if signal is not None else [],
+                signal_rules_result=list(signal.rules_result) if signal is not None else [],
+                invalidation_price=as_float(recommendation.invalidation_price),
+                entry_low=as_float(recommendation.entry_low),
+                entry_high=as_float(recommendation.entry_high),
+                target_low=as_float(recommendation.target_low),
+                target_high=as_float(recommendation.target_high),
+                entry_price=as_float(entry_version.price) if entry_version is not None else None,
+                sessions_since_active=held,
+                expected_holding_days_max=recommendation.expected_holding_days_max,
+                baseline_composite=baseline.number("composite_score"),
+                current_composite=current.number("composite_score"),
+                baseline_factors=baseline.factors,
+                corporate_actions=[
+                    {
+                        "action_type": action.action_type,
+                        "ex_date": action.ex_date,
+                        "description": action.description,
+                    }
+                    for action in actions
+                ],
+            )
+        )
+
+    def _store_thesis_snapshot(
+        self,
+        recommendation: Recommendation,
+        snapshot: ThesisSnapshot,
+        decision: LifecycleDecision,
+        as_of: date,
+        price: float | None,
+    ) -> None:
+        assessment = decision.assessment
+        summary = decision.change_summary
+        if not summary:
+            # Every snapshot explains today's picture, not only the state changes.
+            summary = (
+                assessment_reason(assessment)
+                if assessment is not None
+                else "No tracked change versus the original thesis."
+            )
+        store.upsert_thesis_snapshots(
+            self.session,
+            [
+                {
+                    "recommendation_id": recommendation.id,
+                    "as_of": as_of,
+                    "state": decision.state.value,
+                    "factors": snapshot.stored_factors(),
+                    "composite_score": snapshot.number("composite_score"),
+                    "price": round_or_none(price),
+                    "weakened_count": assessment.weakened_count if assessment else 0,
+                    "improved_count": assessment.improved_count if assessment else 0,
+                    "summary": summary,
+                }
+            ],
+        )
+
+    def _store_events(
+        self,
+        recommendation: Recommendation,
+        decision: LifecycleDecision,
+        as_of: date,
+        price: float | None,
+        assessment: ThesisAssessment | None,
+        triggers: Sequence[ExitTrigger],
+    ) -> list[dict]:
+        if decision.event is None:
+            return []
+        version = recommendation.latest_version + (1 if decision.changed else 0)
+        mechanism = decision.mechanism.value if decision.mechanism else ""
+        dedupe = f"rec{recommendation.id}:{as_of.isoformat()}:{decision.event.value}:{mechanism}"
+        detail: dict = {
+            "reasons": list(decision.reasons),
+            "assessment": assessment.as_dict() if assessment else None,
+            "triggers": [trigger.as_dict() for trigger in triggers],
+            "tracking_version": TRACKING_VERSION,
+        }
+        rows = [
+            {
+                "recommendation_id": recommendation.id,
+                "as_of": as_of,
+                "event_type": decision.event.value,
+                "mechanism": mechanism or None,
+                "previous_state": recommendation.state.value,
+                "new_state": decision.state.value,
+                "title": decision.change_summary or decision.event.value.replace("_", " ").title(),
+                "message": " ".join(decision.reasons),
+                "detail": detail,
+                "recommendation_version": version,
+                "price": round_or_none(price),
+                "calc_version": self.calc_version,
+                "dedupe_key": dedupe,
+            }
+        ]
+        store.insert_recommendation_events(self.session, rows)
+        return rows
+
+    def _apply_decision(
+        self,
+        recommendation: Recommendation,
+        decision: LifecycleDecision,
+        as_of: date,
+        signal: Signal | None,
+        version: RecommendationVersion | None,
+    ) -> None:
+        """Append the new version and move the live view to the new state."""
+        latest = version.version if version is not None else recommendation.latest_version
+        new_version = latest + 1
+        store.insert_recommendation_version(
+            self.session,
+            recommendation.id,
+            new_version,
+            {
+                "as_of": as_of,
+                "state": decision.state.value,
+                "signal_type": signal.signal_type.value if signal is not None else None,
+                "price": as_float(signal.price) if signal is not None else None,
+                "confidence": as_float(signal.confidence) if signal is not None else None,
+                "composite_score": as_float(signal.composite_score) if signal is not None else None,
+                "risk_level": signal.risk_level.value if signal is not None else None,
+                "entry_low": as_float(signal.entry_low) if signal is not None else None,
+                "entry_high": as_float(signal.entry_high) if signal is not None else None,
+                "target_low": as_float(signal.target_low) if signal is not None else None,
+                "target_high": as_float(signal.target_high) if signal is not None else None,
+                "invalidation_price": as_float(signal.invalidation_price)
+                if signal is not None
+                else None,
+                "rules_result": signal.rules_result if signal is not None else [],
+                "reasons": list(decision.reasons),
+                "change_summary": decision.change_summary,
+            },
+        )
+        recommendation.latest_version = new_version
+        recommendation.state = decision.state
+        recommendation.last_as_of = as_of
+        if signal is not None:
+            recommendation.current_price = signal.price
+            recommendation.confidence = signal.confidence
+        if decision.state is RecommendationState.ENTRY and recommendation.active_since is None:
+            recommendation.active_since = as_of
+        if decision.state is RecommendationState.CLOSED:
+            recommendation.closed_at = datetime.utcnow()
+        if decision.state is RecommendationState.EXIT:
+            # Every mechanism that fired is kept, so an exit is never explained
+            # by only the first reason that happened to sort first.
+            recommendation.exit_reason = " | ".join(decision.reasons) or None
+        self.session.flush()
+
+    def dispatch_notifications(
+        self, index_codes: Sequence[str], as_of: date | None = None
+    ) -> JobResult:
+        """Turn recommendation events and regime changes into notifications.
+
+        Notifications are deduplicated on the exact fact that produced them, so
+        re-running the EOD chain never re-alerts on unchanged data while every
+        new state change, exit mechanism or regime label is reported with its
+        reason.
+        """
+        run = self._start_run("dispatch_notifications", {"index_codes": list(index_codes)})
+        result = JobResult(
+            run_id=run.id, job_name="dispatch_notifications", status=RunStatus.RUNNING
+        )
+        try:
+            if as_of is None:
+                as_of = self.session.scalar(
+                    select(func.max(RecommendationEvent.as_of))
+                ) or self.session.scalar(select(func.max(Recommendation.last_as_of)))
+            if as_of is None:
+                self.session.commit()
+                self._finish_run(run, result)
+                return result
+
+            index_ids = store.ensure_indices(self.session, list(index_codes))
+            instrument_ids = sorted(
+                _member_instrument_ids(
+                    _membership_intervals(
+                        self.session, list(index_codes), date(1900, 1, 1), date(2900, 1, 1)
+                    )
+                )
+            )
+            recommendations = store.get_recommendations(self.session, instrument_ids)
+            symbols = self._symbol_map([r.instrument_id for r in recommendations])
+            drafts: list[NotificationDraft] = []
+            for recommendation in recommendations:
+                original = self.session.scalar(
+                    select(RecommendationVersion).where(
+                        RecommendationVersion.recommendation_id == recommendation.id,
+                        RecommendationVersion.version == 1,
+                    )
+                )
+                drafts.append(
+                    new_recommendation_draft(
+                        recommendation_id=recommendation.id,
+                        instrument_id=recommendation.instrument_id,
+                        symbol=symbols.get(recommendation.instrument_id, "unknown"),
+                        strategy_code=recommendation.strategy_code,
+                        as_of=recommendation.first_as_of,
+                        state=(
+                            original.state.value
+                            if original is not None
+                            else recommendation.state.value
+                        ),
+                        message=recommendation.thesis,
+                        reason=recommendation.created_reason,
+                        price=as_float(recommendation.current_price),
+                    )
+                )
+                for event in store.get_recommendation_events(
+                    self.session, recommendation.id, as_of
+                ):
+                    drafts.extend(
+                        self._event_drafts(event, recommendation, symbols, as_of)
+                    )
+            drafts.extend(self._regime_drafts(index_ids, as_of))
+
+            keys = [draft.dedupe_key for draft in drafts]
+            fresh = deduplicate(drafts, store.existing_notification_keys(self.session, keys))
+            stored = store.insert_notifications(
+                self.session, [draft.as_columns(self.calc_version) for draft in fresh]
+            )
+            result.items_processed = stored
+            result.per_symbol = [
+                {
+                    "notification_type": draft.notification_type.value,
+                    "recommendation_id": draft.recommendation_id,
+                    "reason": draft.reason,
+                }
+                for draft in fresh
+            ]
+            self.session.commit()
+            self._finish_run(run, result)
+            return result
+        except Exception as exc:  # noqa: BLE001
+            self.session.rollback()
+            self._fail_run(run, result, exc)
+            raise
+
+    def _event_drafts(
+        self,
+        event: RecommendationEvent,
+        recommendation: Recommendation,
+        symbols: dict[int, str],
+        as_of: date,
+    ) -> list[NotificationDraft]:
+        detail = event.detail or {}
+        assessment = _assessment_from_detail(detail.get("assessment"))
+        triggers = _triggers_from_detail(detail.get("triggers"))
+        return from_event(
+            {
+                "event_type": event.event_type,
+                "as_of": event.as_of,
+                "recommendation_id": recommendation.id,
+                "recommendation_version": event.recommendation_version,
+                "instrument_id": recommendation.instrument_id,
+                "strategy_code": recommendation.strategy_code,
+                "mechanism": event.mechanism.value if event.mechanism else None,
+                "previous_state": event.previous_state.value if event.previous_state else None,
+                "new_state": event.new_state.value if event.new_state else None,
+                "title": event.title,
+                "message": event.message,
+                "price": as_float(event.price),
+                "detail": detail,
+            },
+            symbol=symbols.get(recommendation.instrument_id, "unknown"),
+            assessment=assessment,
+            triggers=triggers,
+        )
+
+    def _regime_drafts(self, index_ids: dict[str, int], as_of: date) -> list[NotificationDraft]:
+        """Alert when an index's regime label changed since its previous value."""
+        drafts: list[NotificationDraft] = []
+        for code, index_id in index_ids.items():
+            labels = self.session.execute(
+                select(MarketRegime.as_of, MarketRegime.regime_label, MarketRegime.regime_score)
+                .where(
+                    MarketRegime.index_id == index_id,
+                    MarketRegime.calc_version == self.calc_version,
+                    MarketRegime.as_of <= as_of,
+                )
+                .order_by(MarketRegime.as_of.desc())
+                .limit(2)
+            ).all()
+            if len(labels) < 2:
+                continue
+            latest_day, latest_label, latest_score = labels[0]
+            previous_label = labels[1][1]
+            if latest_label == previous_label:
+                continue
+            drafts.append(
+                regime_change_draft(
+                    index_id=index_id,
+                    index_code=code,
+                    previous=str(previous_label),
+                    current=str(latest_label),
+                    as_of=latest_day,
+                    score=as_float(latest_score),
+                )
+            )
+        return drafts
+
     # --------------------------------------------------------------- combined
     def compute_eod(
         self, index_codes: Sequence[str], start: date | None = None, end: date | None = None
@@ -1276,7 +2044,8 @@ class MetricsService:
 
         Phase 2 (fundamentals, technical, momentum, valuation) feeds Phase 3
         (sector aggregates, market regime, horizon, scoring), which in turn
-        feeds Phase 4 (per-strategy signals and tracked recommendations).
+        feeds Phase 4 (per-strategy signals and tracked recommendations) and
+        Phase 5 (daily thesis monitoring, exits and notifications).
         """
         return [
             self.compute_fundamentals(index_codes),
@@ -1289,6 +2058,8 @@ class MetricsService:
             self.compute_scoring(index_codes, start, end),
             self.compute_signals(index_codes, start, end),
             self.generate_recommendations(index_codes),
+            self.track_recommendations(index_codes),
+            self.dispatch_notifications(index_codes),
         ]
 
     # ---------------------------------------------------------------- audit

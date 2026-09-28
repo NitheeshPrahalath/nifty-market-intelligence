@@ -83,7 +83,11 @@ never a plain BUY/SELL generator.
 
 **P5 — Tracking, Thesis Monitoring, Exit, Notifications (Wk 10–14)**
 - Daily re-eval vs thesis snapshot; change detection → `THESIS_WEAKENING`/`EXIT_REVIEW`
-- Six exit mechanisms wired to reasons; notification engine with reason + dedupe + history
+- 13-factor thesis tracking (fundamental, technical, valuation, regime) compared
+  against the recommendation's own baseline day
+- Eight independent exit mechanisms (risk, technical, fundamental, valuation,
+  target, time, event, strategy) wired to reasons; notification engine with
+  reason + dedupe + history
 
 **P6 — Backtesting Engine (Wk 12–16)**
 - As-of snapshots (historical membership, fundamentals-at-date); no look-ahead/survivorship bias
@@ -116,7 +120,7 @@ never a plain BUY/SELL generator.
 - [x] **P2 Indicator & Metrics Engines**
 - [x] **P3 Regime / Sector / Horizon / Scoring**
 - [x] **P4 Strategy / Signal / Recommendation**
-- [ ] P5 Tracking / Thesis Monitoring / Exit / Notifications
+- [x] **P5 Tracking / Thesis Monitoring / Exit / Notifications**
 - [ ] P6 Backtesting Engine
 - [ ] P7 API Backend
 - [ ] P8 Frontend Dashboard

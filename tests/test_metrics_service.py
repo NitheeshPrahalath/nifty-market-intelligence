@@ -15,7 +15,9 @@ from nmi.core.models import (
     Instrument,
     MarketRegime,
     MomentumMetric,
+    Notification,
     Recommendation,
+    RecommendationEvent,
     RecommendationVersion,
     RelativeStrengthMetric,
     ScoringSnapshot,
@@ -25,6 +27,7 @@ from nmi.core.models import (
     StrategyParameter,
     StrategyVersion,
     TechnicalIndicator,
+    ThesisSnapshot,
     ValuationMetric,
 )
 from nmi.ingestion import store
@@ -40,8 +43,11 @@ def _sessions(start: date, end: date) -> int:
     return sum(1 for i in range(n) if (start + timedelta(days=i)).weekday() < 5)
 
 
-def _count(session, model) -> int:
-    return session.scalar(select(func.count()).select_from(model))
+def _count(session, model, *criteria) -> int:
+    statement = select(func.count()).select_from(model)
+    if criteria:
+        statement = statement.where(*criteria)
+    return session.scalar(statement)
 
 
 def _stock_rows(session, model, symbol: str):
@@ -138,9 +144,13 @@ def test_compute_eod_chains_and_rerun_is_idempotent(sqlite_session, pointed_at_l
     msvc.backfill_index_prices(["NIFTY_50"])
 
     results = msvc.compute_eod(["NIFTY_50"], START, END)
-    assert len(results) == 10
+    assert len(results) == 12
     assert all(r.status == RunStatus.SUCCEEDED for r in results)
     assert all(r.items_failed == 0 for r in results)
+    assert [r.job_name for r in results][-2:] == [
+        "track_recommendations",
+        "dispatch_notifications",
+    ]
 
     tech_before = _count(sqlite_session, TechnicalIndicator)
     mom_before = _count(sqlite_session, MomentumMetric)
@@ -151,10 +161,14 @@ def test_compute_eod_chains_and_rerun_is_idempotent(sqlite_session, pointed_at_l
     scoring_before = _count(sqlite_session, ScoringSnapshot)
     signal_before = _count(sqlite_session, Signal)
     rec_before = _count(sqlite_session, Recommendation)
+    snapshot_before = _count(sqlite_session, ThesisSnapshot)
+    event_before = _count(sqlite_session, RecommendationEvent)
+    notification_before = _count(sqlite_session, Notification)
     assert tech_before > 0 and mom_before > 0 and val_before > 0
     assert sector_before > 0 and regime_before > 0
     assert horizon_before > 0 and scoring_before > 0
     assert signal_before > 0
+    assert snapshot_before > 0 and event_before > 0 and notification_before > 0
 
     rerun = msvc.compute_eod(["NIFTY_50"], START, END)
     assert all(r.status == RunStatus.SUCCEEDED for r in rerun)
@@ -167,9 +181,23 @@ def test_compute_eod_chains_and_rerun_is_idempotent(sqlite_session, pointed_at_l
     assert _count(sqlite_session, ScoringSnapshot) == scoring_before
     assert _count(sqlite_session, Signal) == signal_before
     assert _count(sqlite_session, Recommendation) == rec_before
-    assert _count(sqlite_session, RecommendationVersion) == _count(
-        sqlite_session, Recommendation
-    )  # one initial version per live recommendation, never rewritten
+    assert _count(sqlite_session, ThesisSnapshot) == snapshot_before
+    assert _count(sqlite_session, RecommendationEvent) == event_before
+    assert _count(sqlite_session, Notification) == notification_before
+    # One initial version per recommendation, never rewritten; tracking may
+    # append later versions but never mutates version 1.
+    assert _count(sqlite_session, RecommendationVersion, RecommendationVersion.version == 1) == (
+        rec_before
+    )
+    assert _count(sqlite_session, RecommendationVersion) >= rec_before
+    for rec in sqlite_session.scalars(select(Recommendation)).all():
+        versions = sqlite_session.scalars(
+            select(RecommendationVersion.version)
+            .where(RecommendationVersion.recommendation_id == rec.id)
+            .order_by(RecommendationVersion.version)
+        ).all()
+        assert list(versions) == list(range(1, len(versions) + 1))
+        assert versions[-1] == rec.latest_version
 
     runs = sqlite_session.scalars(select(IngestionRun)).all()
     assert all(r.status == RunStatus.SUCCEEDED for r in runs)
@@ -432,7 +460,20 @@ def test_recommendations_are_created_once_with_an_initial_version(
     # A second pass must not duplicate or rewrite the live recommendations.
     again = msvc.generate_recommendations(["NIFTY_50"], END)
     assert again.items_processed == 0
-    # Every recommendation still has exactly one (initial) version.
-    assert _count(sqlite_session, Recommendation) == _count(sqlite_session, RecommendationVersion)
-    assert all(v.version == 1 for v in sqlite_session.scalars(select(RecommendationVersion)))
+    # Every recommendation still has exactly one initial version (Phase 5
+    # tracking may append later versions, but never rewrites version 1).
+    assert _count(sqlite_session, Recommendation) == _count(
+        sqlite_session, RecommendationVersion, RecommendationVersion.version == 1
+    )
+    # The custom strategy's recommendations were never tracked, so they keep
+    # exactly the single initial version.
+    custom_ids = [r.id for r in recs]
+    assert [
+        v.version
+        for v in sqlite_session.scalars(
+            select(RecommendationVersion)
+            .where(RecommendationVersion.recommendation_id.in_(custom_ids))
+            .order_by(RecommendationVersion.recommendation_id, RecommendationVersion.version)
+        )
+    ] == [1, 1, 1]
     assert _count(sqlite_session, Recommendation) > 3  # catalog strategies qualify too

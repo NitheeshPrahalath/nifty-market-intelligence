@@ -1076,6 +1076,8 @@ class Recommendation(Base):
     latest_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     first_as_of: Mapped[date] = mapped_column(Date, nullable=False)
     last_as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    active_since: Mapped[date | None] = mapped_column(Date)
+    last_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     exit_reason: Mapped[str | None] = mapped_column(Text)
 
@@ -1141,6 +1143,228 @@ class RecommendationVersion(Base):
     rules_result: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
     reasons: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     change_summary: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class EventType(enum.StrEnum):
+    """Lifecycle events recorded for a tracked recommendation (Phase 5)."""
+
+    RECOMMENDATION_CREATED = "RECOMMENDATION_CREATED"
+    ENTRY_ZONE_REACHED = "ENTRY_ZONE_REACHED"
+    RECOMMENDATION_UPGRADED = "RECOMMENDATION_UPGRADED"
+    RECOMMENDATION_DOWNGRADED = "RECOMMENDATION_DOWNGRADED"
+    THESIS_IMPROVED = "THESIS_IMPROVED"
+    THESIS_WEAKENED = "THESIS_WEAKENED"
+    TARGET_REACHED = "TARGET_REACHED"
+    RISK_TRIGGERED = "RISK_TRIGGERED"
+    EXIT_REVIEW_SIGNAL = "EXIT_REVIEW_SIGNAL"
+    EXIT_SIGNAL = "EXIT_SIGNAL"
+    RECOMMENDATION_CLOSED = "RECOMMENDATION_CLOSED"
+
+
+class ExitMechanism(enum.StrEnum):
+    """The independent mechanisms that can end or flag a recommendation.
+
+    ``STRATEGY`` covers exits raised by the strategy's own declarative rules
+    (the Phase-4 invalidation/exit groups); the remaining mechanisms are
+    evaluated by the Phase-5 exit engine, each with its own reason.
+    """
+
+    TECHNICAL = "TECHNICAL"
+    FUNDAMENTAL = "FUNDAMENTAL"
+    VALUATION = "VALUATION"
+    RISK = "RISK"
+    TARGET = "TARGET"
+    TIME = "TIME"
+    EVENT = "EVENT"
+    STRATEGY = "STRATEGY"
+
+
+class NotificationType(enum.StrEnum):
+    """Alert types the notification engine can emit (Phase 5).
+
+    Every notification carries a reason; unexplained BUY/SELL alerts are never
+    produced.
+    """
+
+    NEW_RECOMMENDATION = "NEW_RECOMMENDATION"
+    ENTRY_ZONE_REACHED = "ENTRY_ZONE_REACHED"
+    RECOMMENDATION_UPGRADED = "RECOMMENDATION_UPGRADED"
+    RECOMMENDATION_DOWNGRADED = "RECOMMENDATION_DOWNGRADED"
+    THESIS_WEAKENING = "THESIS_WEAKENING"
+    THESIS_IMPROVED = "THESIS_IMPROVED"
+    FUNDAMENTAL_CHANGE = "FUNDAMENTAL_CHANGE"
+    TECHNICAL_CHANGE = "TECHNICAL_CHANGE"
+    TARGET_REVIEW_ZONE_REACHED = "TARGET_REVIEW_ZONE_REACHED"
+    RISK_CONDITION_TRIGGERED = "RISK_CONDITION_TRIGGERED"
+    EXIT_CONDITION_TRIGGERED = "EXIT_CONDITION_TRIGGERED"
+    RECOMMENDATION_CLOSED = "RECOMMENDATION_CLOSED"
+    MARKET_REGIME_CHANGE = "MARKET_REGIME_CHANGE"
+
+
+class ChangeDirection(enum.StrEnum):
+    """Direction of a tracked thesis factor versus the original snapshot."""
+
+    WEAKENED = "WEAKENED"
+    IMPROVED = "IMPROVED"
+    UNCHANGED = "UNCHANGED"
+    APPEARED = "APPEARED"
+    MISSING = "MISSING"
+
+
+class ThesisSnapshot(Base):
+    """Structured snapshot of the factors that justified a recommendation.
+
+    Phase 5 writes one row per recommendation per day so the original thesis
+    can be compared with today's evidence ("EPS growth 18% -> 7%") instead of
+    silently keeping the old recommendation.
+    """
+
+    __tablename__ = "thesis_snapshots"
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", "as_of", name="uq_thesis_snapshot_day"),
+        SqlIndex("ix_thesis_snapshot_rec_asof", "recommendation_id", "as_of"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recommendation_id: Mapped[int] = mapped_column(
+        ForeignKey("recommendations.id"), nullable=False
+    )
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    state: Mapped[RecommendationState] = mapped_column(
+        Enum(
+            RecommendationState,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    factors: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    composite_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    weakened_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    improved_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class RecommendationEvent(Base):
+    """One auditable lifecycle event of a tracked recommendation (Phase 5).
+
+    ``dedupe_key`` makes event creation idempotent so a re-run of the EOD chain
+    never duplicates history.
+    """
+
+    __tablename__ = "recommendation_events"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_recommendation_event_key"),
+        SqlIndex("ix_recommendation_event_rec_asof", "recommendation_id", "as_of"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recommendation_id: Mapped[int] = mapped_column(
+        ForeignKey("recommendations.id"), nullable=False
+    )
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    event_type: Mapped[EventType] = mapped_column(
+        Enum(
+            EventType,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    mechanism: Mapped[ExitMechanism | None] = mapped_column(
+        Enum(
+            ExitMechanism,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        )
+    )
+    previous_state: Mapped[RecommendationState | None] = mapped_column(
+        Enum(
+            RecommendationState,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        )
+    )
+    new_state: Mapped[RecommendationState | None] = mapped_column(
+        Enum(
+            RecommendationState,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        )
+    )
+    title: Mapped[str] = mapped_column(String(128), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    recommendation_version: Mapped[int | None] = mapped_column(Integer)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(160), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class Notification(Base):
+    """Notification history (Phase 5).
+
+    Notifications are immutable: ``dedupe_key`` encodes the alert type and the
+    exact fact that triggered it (recommendation version, mechanism, regime
+    label), so the same alert is never delivered twice while a genuinely new
+    fact always is.
+    """
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_notification_dedupe_key"),
+        SqlIndex("ix_notification_asof_type", "as_of", "notification_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    notification_type: Mapped[NotificationType] = mapped_column(
+        Enum(
+            NotificationType,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    severity: Mapped[Severity] = mapped_column(
+        Enum(Severity, native_enum=False, values_callable=lambda e: [x.value for x in e]),
+        default=Severity.INFO,
+        nullable=False,
+    )
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    recommendation_id: Mapped[int | None] = mapped_column(ForeignKey("recommendations.id"))
+    recommendation_version: Mapped[int | None] = mapped_column(Integer)
+    instrument_id: Mapped[int | None] = mapped_column(ForeignKey("instruments.id"))
+    index_id: Mapped[int | None] = mapped_column(ForeignKey("indices.id"))
+    strategy_code: Mapped[str | None] = mapped_column(String(48))
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False

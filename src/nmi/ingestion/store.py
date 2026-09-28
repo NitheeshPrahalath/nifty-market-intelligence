@@ -32,7 +32,9 @@ from nmi.core.models import (
     Instrument,
     MarketRegime,
     MomentumMetric,
+    Notification,
     Recommendation,
+    RecommendationEvent,
     RecommendationState,
     RecommendationVersion,
     RelativeStrengthMetric,
@@ -44,6 +46,7 @@ from nmi.core.models import (
     StrategyParameter,
     StrategyVersion,
     TechnicalIndicator,
+    ThesisSnapshot,
     ValuationMetric,
 )
 from nmi.ingestion.adjustments import AdjustedCandle
@@ -784,3 +787,163 @@ def insert_recommendation_version(
     session.add(row)
     session.flush()
     return row
+
+
+# ---------------------------------------------------------------------------
+# Tracking, exit and notification persistence (Phase 5)
+# ---------------------------------------------------------------------------
+
+
+def get_tracked_recommendations(
+    session: Session, instrument_ids: Sequence[int] | None = None
+) -> list[Recommendation]:
+    """Every non-closed recommendation, oldest first (the daily work list)."""
+    stmt = select(Recommendation).where(Recommendation.state != RecommendationState.CLOSED)
+    if instrument_ids is not None:
+        stmt = stmt.where(Recommendation.instrument_id.in_(list(instrument_ids)))
+    return list(
+        session.scalars(stmt.order_by(Recommendation.id)).unique().all()
+    )
+
+
+def get_recommendations(
+    session: Session, instrument_ids: Sequence[int] | None = None
+) -> list[Recommendation]:
+    """Every recommendation including closed ones."""
+    stmt = select(Recommendation)
+    if instrument_ids is not None:
+        stmt = stmt.where(Recommendation.instrument_id.in_(list(instrument_ids)))
+    return list(session.scalars(stmt.order_by(Recommendation.id)).unique().all())
+
+
+def latest_recommendation_version(
+    session: Session, recommendation_id: int
+) -> RecommendationVersion | None:
+    return session.scalar(
+        select(RecommendationVersion)
+        .where(RecommendationVersion.recommendation_id == recommendation_id)
+        .order_by(RecommendationVersion.version.desc())
+    )
+
+
+def get_thesis_snapshots(
+    session: Session, recommendation_id: int
+) -> list[ThesisSnapshot]:
+    return list(
+        session.scalars(
+            select(ThesisSnapshot)
+            .where(ThesisSnapshot.recommendation_id == recommendation_id)
+            .order_by(ThesisSnapshot.as_of)
+        ).all()
+    )
+
+
+def get_thesis_snapshot(
+    session: Session, recommendation_id: int, as_of: date
+) -> ThesisSnapshot | None:
+    return session.scalar(
+        select(ThesisSnapshot).where(
+            ThesisSnapshot.recommendation_id == recommendation_id,
+            ThesisSnapshot.as_of == as_of,
+        )
+    )
+
+
+def upsert_thesis_snapshots(session: Session, rows: Iterable[Mapping]) -> int:
+    """Idempotent daily thesis snapshots (one per recommendation-day)."""
+    rows = [{k: _clean_value(v) for k, v in row.items()} for row in rows]
+    if not rows:
+        return 0
+    _bulk_upsert(
+        session,
+        ThesisSnapshot.__table__,
+        rows,
+        index_elements=["recommendation_id", "as_of"],
+        exclude_from_update={"as_of", "created_at"},
+    )
+    session.flush()
+    return len(rows)
+
+
+def existing_dedupe_keys(session: Session, keys: Sequence[str]) -> set[str]:
+    """Which of ``keys`` already exist in an append-only audit table."""
+    if not keys:
+        return set()
+    found: set[str] = set()
+    for chunk_start in range(0, len(keys), 500):
+        chunk = list(keys[chunk_start : chunk_start + 500])
+        found.update(
+            session.scalars(
+                select(RecommendationEvent.dedupe_key).where(
+                    RecommendationEvent.dedupe_key.in_(chunk)
+                )
+            ).all()
+        )
+    return found
+
+
+def existing_notification_keys(session: Session, keys: Sequence[str]) -> set[str]:
+    """Which notification dedupe keys are already in the history table."""
+    if not keys:
+        return set()
+    found: set[str] = set()
+    for chunk_start in range(0, len(keys), 500):
+        chunk = list(keys[chunk_start : chunk_start + 500])
+        found.update(
+            session.scalars(
+                select(Notification.dedupe_key).where(Notification.dedupe_key.in_(chunk))
+            ).all()
+        )
+    return found
+
+
+def insert_recommendation_events(
+    session: Session, rows: Iterable[Mapping], skip_existing: bool = True
+) -> int:
+    """Append lifecycle events; ``dedupe_key`` keeps a re-run from duplicating."""
+    rows = [{k: _clean_value(v) for k, v in row.items()} for row in rows]
+    if not rows:
+        return 0
+    if skip_existing:
+        existing = existing_dedupe_keys(
+            session, [row["dedupe_key"] for row in rows]
+        )
+        rows = [row for row in rows if row["dedupe_key"] not in existing]
+        if not rows:
+            return 0
+    session.add_all([RecommendationEvent(**row) for row in rows])
+    session.flush()
+    return len(rows)
+
+
+def get_recommendation_events(
+    session: Session, recommendation_id: int, as_of: date | None = None
+) -> list[RecommendationEvent]:
+    stmt = select(RecommendationEvent).where(
+        RecommendationEvent.recommendation_id == recommendation_id
+    )
+    if as_of is not None:
+        stmt = stmt.where(RecommendationEvent.as_of == as_of)
+    return list(session.scalars(stmt.order_by(RecommendationEvent.id)).all())
+
+
+def insert_notifications(session: Session, rows: Iterable[Mapping]) -> int:
+    """Append notification history (deduplicated by the caller)."""
+    rows = [{k: _clean_value(v) for k, v in row.items()} for row in rows]
+    if not rows:
+        return 0
+    session.add_all([Notification(**row) for row in rows])
+    session.flush()
+    return len(rows)
+
+
+def get_corporate_actions(
+    session: Session, instrument_id: int, start: date | None = None, end: date | None = None
+) -> list[CorporateAction]:
+    """Corporate actions for one instrument, optionally limited to a date range."""
+    stmt = select(CorporateAction).where(CorporateAction.instrument_id == instrument_id)
+    if start is not None:
+        stmt = stmt.where(CorporateAction.ex_date > start)
+    if end is not None:
+        stmt = stmt.where(CorporateAction.ex_date <= end)
+    return list(session.scalars(stmt.order_by(CorporateAction.ex_date)).all())

@@ -21,6 +21,8 @@ Examples
     nmi seed-strategies
     nmi compute-signals --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
     nmi generate-recommendations --index NIFTY_50
+    nmi track-recommendations --index NIFTY_50
+    nmi dispatch-notifications --index NIFTY_50
     nmi compute-eod --index NIFTY_50 --start 2024-01-01 --end 2025-06-30
 """
 
@@ -210,7 +212,7 @@ def compute_eod(
     end: str | None = typer.Option(None, "--end"),
     db_url: str | None = typer.Option(None, "--db-url"),
 ):
-    """Run the full EOD chain: metrics (Phase 2), analysis (Phase 3), strategies (Phase 4)."""
+    """Run the full EOD chain: metrics, analysis, strategies, tracking (Phases 2-5)."""
     from nmi.metrics.service import MetricsService
 
     index_codes = [c.strip() for c in index.split(",") if c.strip()]
@@ -332,6 +334,40 @@ def seed_strategies(
         stored = MetricsService(session).seed_strategies()
         session.commit()
     typer.echo({"strategy_versions_created": stored})
+
+
+@app.command()
+def track_recommendations(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    as_of: str | None = typer.Option(None, "--as-of", help="Defaults to the latest metric day"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Re-evaluate open recommendations against their original thesis (Phase 5)."""
+    from nmi.metrics.service import MetricsService
+
+    index_codes = [c.strip() for c in index.split(",") if c.strip()]
+    with _sessionctx(db_url) as session:
+        result = MetricsService(session).track_recommendations(
+            index_codes, _cli_date(as_of) if as_of else None
+        )
+    typer.echo(result.as_dict())
+
+
+@app.command()
+def dispatch_notifications(
+    index: str = typer.Option(..., "--index", help="Comma-separated index codes"),
+    as_of: str | None = typer.Option(None, "--as-of", help="Defaults to the latest event day"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Turn recommendation events and regime changes into notifications (Phase 5)."""
+    from nmi.metrics.service import MetricsService
+
+    index_codes = [c.strip() for c in index.split(",") if c.strip()]
+    with _sessionctx(db_url) as session:
+        result = MetricsService(session).dispatch_notifications(
+            index_codes, _cli_date(as_of) if as_of else None
+        )
+    typer.echo(result.as_dict())
 
 
 def main() -> None:
