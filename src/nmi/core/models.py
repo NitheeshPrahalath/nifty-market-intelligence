@@ -8,6 +8,7 @@ The platform keeps each responsibility in its own entity family:
 * fundamentals raw      -> IncomeStatement, BalanceSheet, CashFlow
 * fundamentals derived  -> FundamentalMetric
 * pipeline audit        -> IngestionRun, IngestionError
+* historical simulation -> BacktestRun, BacktestTrade, BacktestEquityPoint
 
 Time-series rows always carry dates/timestamps. Historical analytical data is
 never overwritten in place; later phases add version-aware tables.
@@ -40,6 +41,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from nmi.core.db import Base
 from nmi.core.enums import (
+    BacktestExitReason,
+    BacktestKind,
+    BacktestRejectReason,
     CorporateActionType,
     Exchange,
     InstrumentType,
@@ -1416,6 +1420,160 @@ class IngestionError(Base):
     instrument_id: Mapped[int | None] = mapped_column(ForeignKey("instruments.id"))
     trade_date: Mapped[date | None] = mapped_column(Date)
     raw_data: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
+class BacktestRun(Base):
+    """One historical simulation and its headline numbers (Phase 6).
+
+    A walk-forward analysis stores a parent ``WALK_FORWARD`` row plus one
+    ``SINGLE`` row per out-of-sample window, so every reported number can be
+    traced to the exact window and configuration that produced it.
+    """
+
+    __tablename__ = "backtest_runs"
+    __table_args__ = (
+        SqlIndex("ix_backtest_run_parent", "parent_run_id"),
+        SqlIndex("ix_backtest_run_window", "window_index"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    kind: Mapped[BacktestKind] = mapped_column(
+        Enum(
+            BacktestKind,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        default=BacktestKind.SINGLE,
+        nullable=False,
+    )
+    parent_run_id: Mapped[int | None] = mapped_column(ForeignKey("backtest_runs.id"))
+    window_index: Mapped[int | None] = mapped_column(Integer)
+    strategy_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    index_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    initial_capital: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    trades_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[RunStatus] = mapped_column(
+        Enum(RunStatus, native_enum=False, values_callable=lambda e: [x.value for x in e]),
+        default=RunStatus.PENDING,
+        nullable=False,
+    )
+    error_summary: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class BacktestTrade(Base):
+    """One round trip: a queued entry, its fill, its exit and the P&L."""
+
+    __tablename__ = "backtest_trades"
+    __table_args__ = (
+        SqlIndex("ix_backtest_trade_run", "run_id"),
+        SqlIndex("ix_backtest_trade_instrument", "instrument_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.id"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    strategy_code: Mapped[str] = mapped_column(String(48), nullable=False)
+    entry_signal_date: Mapped[date] = mapped_column(Date, nullable=False)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    entry_price: Mapped[float] = mapped_column(Numeric(18, 4), nullable=False)
+    exit_date: Mapped[date] = mapped_column(Date, nullable=False)
+    exit_price: Mapped[float] = mapped_column(Numeric(18, 4), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    gross_pnl: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)
+    cost: Mapped[float] = mapped_column(Numeric(18, 2), default=0, nullable=False)
+    net_pnl: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)
+    return_pct: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False)
+    holding_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    stop_price: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    target_price: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    exit_reason: Mapped[BacktestExitReason] = mapped_column(
+        Enum(
+            BacktestExitReason,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    exit_detail: Mapped[str] = mapped_column(Text, nullable=False)
+    entry_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    exit_reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    mae_pct: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    mfe_pct: Mapped[float | None] = mapped_column(Numeric(10, 4))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+
+class BacktestEquityPoint(Base):
+    """Daily mark-to-market of a simulated portfolio (Phase 6)."""
+
+    __tablename__ = "backtest_equity_points"
+    __table_args__ = (
+        UniqueConstraint("run_id", "as_of", name="uq_backtest_equity_point"),
+        SqlIndex("ix_backtest_equity_run", "run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    equity: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)
+    cash: Mapped[float] = mapped_column(Numeric(18, 2), nullable=False)
+    positions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    exposure_pct: Mapped[float] = mapped_column(Numeric(10, 4), default=0, nullable=False)
+    drawdown_pct: Mapped[float] = mapped_column(Numeric(10, 4), default=0, nullable=False)
+
+
+class BacktestRejection(Base):
+    """Orders the engine refused, so the simulation stays auditable."""
+
+    __tablename__ = "backtest_rejections"
+    __table_args__ = (SqlIndex("ix_backtest_rejection_run", "run_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("backtest_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.id"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    strategy_code: Mapped[str] = mapped_column(String(48), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)
+    reason: Mapped[BacktestRejectReason] = mapped_column(
+        Enum(
+            BacktestRejectReason,
+            native_enum=False,
+            values_callable=lambda e: [x.value for x in e],
+        ),
+        nullable=False,
+    )
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False

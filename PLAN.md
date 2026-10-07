@@ -121,7 +121,7 @@ never a plain BUY/SELL generator.
 - [x] **P3 Regime / Sector / Horizon / Scoring**
 - [x] **P4 Strategy / Signal / Recommendation**
 - [x] **P5 Tracking / Thesis Monitoring / Exit / Notifications**
-- [ ] P6 Backtesting Engine
+- [x] **P6 Backtesting Engine**
 - [ ] P7 API Backend
 - [ ] P8 Frontend Dashboard
 - [ ] P9 AI Explanations Layer

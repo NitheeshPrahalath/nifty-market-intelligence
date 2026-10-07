@@ -19,6 +19,21 @@ _TREND_DOWN = "DOWNTREND"
 _TREND_FLAT = "CONSOLIDATION"
 
 
+def _factor(candle: CandleLike) -> float:
+    """Per-bar adjustment factor, so open/high/low share the close's basis.
+
+    ``adjusted_close`` is the authoritative adjusted series; high and low are
+    stored raw, so they have to be scaled by the same ratio. Without this a
+    calculation that mixes the two (true range, stochastics, Williams %R) would
+    be comparing prices from two different scales and produce nonsense.
+    """
+    close = getattr(candle, "close", None)
+    adjusted = getattr(candle, "adjusted_close", None)
+    if close is None or adjusted is None or float(close) == 0:
+        return 1.0
+    return float(adjusted) / float(close)
+
+
 def _prices(candles: Sequence[CandleLike]) -> np.ndarray:
     return np.asarray(
         [
@@ -31,11 +46,17 @@ def _prices(candles: Sequence[CandleLike]) -> np.ndarray:
 
 
 def _highs(candles: Sequence[CandleLike]) -> np.ndarray:
-    return np.asarray([float(c.high) for c in candles], dtype=float)
+    return np.asarray(
+        [float(c.high) * _factor(c) for c in candles],
+        dtype=float,
+    )
 
 
 def _lows(candles: Sequence[CandleLike]) -> np.ndarray:
-    return np.asarray([float(c.low) for c in candles], dtype=float)
+    return np.asarray(
+        [float(c.low) * _factor(c) for c in candles],
+        dtype=float,
+    )
 
 
 def _volumes(candles: Sequence[CandleLike]) -> np.ndarray:
@@ -66,12 +87,20 @@ def _ema(a: np.ndarray, span: int) -> np.ndarray:
 
 
 def _wilder(a: np.ndarray, n: int) -> np.ndarray:
+    """Wilder's smoothed average: seed with the mean of the first ``n`` values,
+    then ``out = out - out/n + value/n`` (equivalently ``(out*(n-1)+value)/n``).
+
+    Seeding with the sum, or dropping the ``/n`` on the new value, leaves the
+    series at a constant factor of ``n`` away from the true average forever —
+    an ATR that is 14x too large silently inflates every ATR-based price level
+    built on top of it.
+    """
     out = np.full(a.shape, np.nan)
     if a.shape[0] <= n:
         return out
-    out[n - 1] = np.sum(a[:n])
+    out[n - 1] = np.mean(a[:n])
     for i in range(n, a.shape[0]):
-        out[i] = out[i - 1] - out[i - 1] / n + a[i]
+        out[i] = out[i - 1] - out[i - 1] / n + a[i] / n
     return out
 
 

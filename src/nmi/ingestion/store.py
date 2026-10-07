@@ -17,6 +17,10 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from nmi.core.models import (
+    BacktestEquityPoint,
+    BacktestRejection,
+    BacktestRun,
+    BacktestTrade,
     BalanceSheet,
     CashFlow,
     Company,
@@ -947,3 +951,69 @@ def get_corporate_actions(
     if end is not None:
         stmt = stmt.where(CorporateAction.ex_date <= end)
     return list(session.scalars(stmt.order_by(CorporateAction.ex_date)).all())
+
+
+# --------------------------------------------------------------- Phase 6
+def create_backtest_run(session: Session, columns: Mapping) -> BacktestRun:
+    """Create one backtest run row (a simulation, or a walk-forward parent)."""
+    run = BacktestRun(**{k: _clean_value(v) for k, v in columns.items()})
+    session.add(run)
+    session.flush()
+    return run
+
+
+def insert_backtest_trades(session: Session, rows: Iterable[Mapping]) -> int:
+    """Append the trades of one simulation; never updated afterwards."""
+    rows = [{k: _clean_value(v) for k, v in row.items()} for row in rows]
+    if not rows:
+        return 0
+    session.add_all([BacktestTrade(**row) for row in rows])
+    session.flush()
+    return len(rows)
+
+
+def insert_backtest_equity_points(session: Session, rows: Iterable[Mapping]) -> int:
+    """Append the daily equity curve of one simulation."""
+    rows = [{k: _clean_value(v) for k, v in row.items()} for row in rows]
+    if not rows:
+        return 0
+    session.add_all([BacktestEquityPoint(**row) for row in rows])
+    session.flush()
+    return len(rows)
+
+
+def insert_backtest_rejections(session: Session, rows: Iterable[Mapping]) -> int:
+    """Record the orders a simulation refused, so a quiet run stays auditable."""
+    rows = [{k: _clean_value(v) for k, v in row.items()} for row in rows]
+    if not rows:
+        return 0
+    session.add_all([BacktestRejection(**row) for row in rows])
+    session.flush()
+    return len(rows)
+
+
+def get_backtest_run(session: Session, backtest_run_id: int) -> BacktestRun | None:
+    return session.get(BacktestRun, backtest_run_id)
+
+
+def list_backtest_runs(session: Session, limit: int = 20) -> list[BacktestRun]:
+    stmt = select(BacktestRun).order_by(BacktestRun.id.desc()).limit(limit)
+    return list(session.scalars(stmt).all())
+
+
+def get_backtest_trades(session: Session, backtest_run_id: int) -> list[BacktestTrade]:
+    stmt = (
+        select(BacktestTrade)
+        .where(BacktestTrade.run_id == backtest_run_id)
+        .order_by(BacktestTrade.entry_date, BacktestTrade.id)
+    )
+    return list(session.scalars(stmt).all())
+
+
+def get_backtest_equity_curve(session: Session, backtest_run_id: int) -> list[BacktestEquityPoint]:
+    stmt = (
+        select(BacktestEquityPoint)
+        .where(BacktestEquityPoint.run_id == backtest_run_id)
+        .order_by(BacktestEquityPoint.as_of)
+    )
+    return list(session.scalars(stmt).all())

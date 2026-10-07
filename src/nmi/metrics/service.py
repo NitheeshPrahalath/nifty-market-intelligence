@@ -9,7 +9,6 @@ failures become ``ingestion_errors`` rows instead of aborting the run.
 from __future__ import annotations
 
 import logging
-from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -21,6 +20,17 @@ from sqlalchemy.orm import Session
 
 from nmi.analysis.common import as_float, round_or_none
 from nmi.analysis.horizon import compute_horizon_metrics
+from nmi.analysis.inputs import (
+    AnalysisInputs,
+    load_analysis_inputs,
+    member_instrument_ids,
+    members_on,
+    membership_intervals,
+    regime_map,
+    row_dict,
+    scoring_map,
+    sector_state_map,
+)
 from nmi.analysis.regime import compute_market_regime, index_return
 from nmi.analysis.scoring import DEFAULT_WEIGHTS, compute_scoring
 from nmi.analysis.sector import compute_sector_metrics
@@ -34,29 +44,22 @@ from nmi.core.models import (
     CorporateActionType,
     DailyPrice,
     EventType,
-    FundamentalMetric,
     HorizonMetric,
     IncomeStatement,
     Index,
-    IndexMembership,
     IndexPrice,
     IngestionError,
     IngestionRun,
     Instrument,
     MarketRegime,
-    MomentumMetric,
     Recommendation,
     RecommendationEvent,
     RecommendationState,
     RecommendationVersion,
-    RelativeStrengthMetric,
-    ScoringSnapshot,
     SectorMetric,
     Signal,
     Strategy,
     StrategyVersion,
-    TechnicalIndicator,
-    ValuationMetric,
 )
 from nmi.indicators.fundamental import compute_fundamental_metrics
 from nmi.indicators.momentum import compute_momentum, compute_relative_strength
@@ -96,36 +99,6 @@ from nmi.tracking import (
     new_recommendation_draft,
     next_state,
     regime_change_draft,
-)
-
-_TECHNICAL_FIELDS = (
-    "sma20",
-    "sma50",
-    "sma200",
-    "atr14",
-    "rsi14",
-    "macd_hist",
-    "adx14",
-    "roc10",
-    "hist_vol_20",
-    "hist_vol_60",
-    "drawdown_pct",
-    "dist_from_high_52w_pct",
-    "dist_from_low_52w_pct",
-    "volume_ratio",
-    "trend_state",
-    "breakout_52w",
-    "high_52w",
-)
-_MOMENTUM_FIELDS = ("return_1m", "return_3m", "return_6m", "return_12m")
-_RS_FIELDS = ("rs_1m", "rs_3m", "rs_6m", "rs_12m", "rs_trend")
-_VALUATION_FIELDS = (
-    "pe",
-    "pb",
-    "pe_percentile_3y",
-    "pb_percentile_3y",
-    "ev_ebitda_percentile_3y",
-    "valuation_label",
 )
 
 log = logging.getLogger(__name__)
@@ -171,15 +144,6 @@ def _benchmark_prices(session: Session, code: str) -> list[IndexPrice]:
         .order_by(IndexPrice.trade_date)
     )
     return list(session.scalars(stmt).all())
-
-
-def _row_dict(row, fields: Sequence[str]) -> dict:
-    """Snapshot the requested columns, unwrapping enums to their values."""
-    out = {}
-    for field_name in fields:
-        value = getattr(row, field_name, None)
-        out[field_name] = getattr(value, "value", value)
-    return out
 
 
 def _parse_day(value) -> date | None:
@@ -228,146 +192,6 @@ def _triggers_from_detail(detail: Sequence | None) -> list[ExitTrigger]:
         )
         for item in (detail or [])
     ]
-
-
-def _load_metric_rows(
-    session: Session,
-    model,
-    instrument_ids: Sequence[int],
-    start: date,
-    end: date,
-    calc_version: str,
-    fields: Sequence[str],
-    benchmark: str | None = None,
-) -> dict[tuple[int, date], dict]:
-    if not instrument_ids:
-        return {}
-    stmt = select(model).where(
-        model.instrument_id.in_(instrument_ids),
-        model.as_of >= start,
-        model.as_of <= end,
-        model.calc_version == calc_version,
-    )
-    if benchmark is not None:
-        stmt = stmt.where(model.benchmark == benchmark)
-    return {
-        (row.instrument_id, row.as_of): _row_dict(row, fields)
-        for row in session.scalars(stmt).all()
-    }
-
-
-def _load_closes(
-    session: Session, instrument_ids: Sequence[int], start: date, end: date
-) -> dict[tuple[int, date], float]:
-    if not instrument_ids:
-        return {}
-    stmt = select(DailyPrice.trade_date, DailyPrice.instrument_id, DailyPrice.close).where(
-        DailyPrice.instrument_id.in_(instrument_ids),
-        DailyPrice.trade_date >= start,
-        DailyPrice.trade_date <= end,
-    )
-    return {(iid, d): float(c) for d, iid, c in session.execute(stmt).all() if c is not None}
-
-
-def _load_fundamentals(
-    session: Session, company_ids: Sequence[int]
-) -> dict[int, dict[str, list[tuple[date, float | None]]]]:
-    if not company_ids:
-        return {}
-    stmt = select(
-        FundamentalMetric.company_id,
-        FundamentalMetric.metric,
-        FundamentalMetric.as_of,
-        FundamentalMetric.value,
-    ).where(FundamentalMetric.company_id.in_(company_ids))
-    grouped: dict[int, dict[str, list[tuple[date, float | None]]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
-    for company_id, metric, as_of, value in session.execute(stmt).all():
-        grouped[company_id][metric].append((as_of, value))
-    for metrics in grouped.values():
-        for series in metrics.values():
-            series.sort(key=lambda item: item[0])
-    return {company_id: dict(metrics) for company_id, metrics in grouped.items()}
-
-
-def _membership_intervals(
-    session: Session, index_codes: Sequence[str], start: date, end: date
-) -> dict[int, list[tuple[date, date | None, int]]]:
-    stmt = (
-        select(IndexMembership)
-        .join(Index, Index.id == IndexMembership.index_id)
-        .where(
-            Index.code.in_(index_codes),
-            IndexMembership.effective_from <= end,
-        )
-    )
-    out: dict[int, list[tuple[date, date | None, int]]] = defaultdict(list)
-    for row in session.scalars(stmt).all():
-        if row.effective_to is not None and row.effective_to < start:
-            continue
-        out[row.index_id].append((row.effective_from, row.effective_to, row.instrument_id))
-    return dict(out)
-
-
-def _members_on(intervals: Sequence[tuple[date, date | None, int]], as_of: date) -> list[int]:
-    """Instrument ids whose membership interval covers ``as_of``."""
-    return [
-        instrument_id
-        for effective_from, effective_to, instrument_id in intervals
-        if effective_from <= as_of and (effective_to is None or effective_to >= as_of)
-    ]
-
-
-def _member_instrument_ids(
-    intervals: dict[int, list[tuple[date, date | None, int]]]
-) -> set[int]:
-    """Every instrument with a membership interval overlapping the window."""
-    return {
-        instrument_id
-        for rows in intervals.values()
-        for (_from, _to, instrument_id) in rows
-    }
-
-
-@dataclass(slots=True)
-class _AnalysisInputs:
-    """Phase-2 metric rows loaded once and reused by every Phase-3 engine."""
-
-    index_ids: dict[str, int]
-    intervals: dict[int, list[tuple[date, date | None, int]]]
-    company_by_instrument: dict[int, int]
-    sector_by_instrument: dict[int, int | None]
-    technical: dict[tuple[int, date], dict]
-    closes: dict[tuple[int, date], float]
-    momentum: dict[tuple[int, date], dict]
-    rs: dict[tuple[int, date], dict]
-    valuation: dict[tuple[int, date], dict]
-    fundamentals: dict[int, dict[str, list[tuple[date, float | None]]]]
-    start: date
-    end: date
-
-    def as_of_dates(self) -> list[date]:
-        return sorted({as_of for _iid, as_of in self.technical})
-
-    def technical_at(self, instrument_id: int, as_of: date) -> dict | None:
-        row = self.technical.get((instrument_id, as_of))
-        if row is None:
-            return None
-        return {
-            **row,
-            "as_of": as_of,
-            "close": self.closes.get((instrument_id, as_of)),
-        }
-
-    def fundamentals_at(self, company_id: int, as_of: date) -> dict:
-        metrics = self.fundamentals.get(company_id, {})
-        out: dict[str, float | None] = {}
-        for metric, series in metrics.items():
-            idx = bisect_right([d for d, _v in series], as_of) - 1
-            if idx >= 0:
-                out[metric] = series[idx][1]
-        return out
 
 
 class MetricsService:
@@ -643,74 +467,10 @@ class MetricsService:
     # ------------------------------------------------------------------ P3
     def _analysis_inputs(
         self, index_codes: Sequence[str], start: date | None, end: date | None
-    ) -> _AnalysisInputs:
-        """Load every Phase-2 metric row the Phase-3 engines need, once."""
-        start = start or date(1900, 1, 1)
-        end = end or date(2900, 1, 1)
-        index_ids = store.ensure_indices(self.session, list(index_codes))
-        intervals = _membership_intervals(self.session, index_codes, start, end)
-        instrument_ids = sorted({iid for rows in intervals.values() for (_f, _t, iid) in rows})
-
-        company_by_instrument: dict[int, int] = {}
-        sector_by_instrument: dict[int, int | None] = {}
-        if instrument_ids:
-            rows = self.session.execute(
-                select(Instrument.id, Instrument.company_id, Company.sector_id)
-                .join(Company, Company.id == Instrument.company_id)
-                .where(Instrument.id.in_(instrument_ids))
-            ).all()
-            company_by_instrument = {iid: cid for iid, cid, _s in rows}
-            sector_by_instrument = {iid: sector for iid, _c, sector in rows}
-
-        benchmark = settings.rs_benchmarks[0] if settings.rs_benchmarks else None
-        return _AnalysisInputs(
-            index_ids=index_ids,
-            intervals=intervals,
-            company_by_instrument=company_by_instrument,
-            sector_by_instrument=sector_by_instrument,
-            technical=_load_metric_rows(
-                self.session,
-                TechnicalIndicator,
-                instrument_ids,
-                start,
-                end,
-                self.calc_version,
-                _TECHNICAL_FIELDS,
-            ),
-            closes=_load_closes(self.session, instrument_ids, start, end),
-            momentum=_load_metric_rows(
-                self.session,
-                MomentumMetric,
-                instrument_ids,
-                start,
-                end,
-                self.calc_version,
-                _MOMENTUM_FIELDS,
-            ),
-            rs=_load_metric_rows(
-                self.session,
-                RelativeStrengthMetric,
-                instrument_ids,
-                start,
-                end,
-                self.calc_version,
-                _RS_FIELDS,
-                benchmark=benchmark,
-            ),
-            valuation=_load_metric_rows(
-                self.session,
-                ValuationMetric,
-                instrument_ids,
-                start,
-                end,
-                self.calc_version,
-                _VALUATION_FIELDS,
-            ),
-            fundamentals=_load_fundamentals(
-                self.session, sorted(set(company_by_instrument.values()))
-            ),
-            start=start,
-            end=end,
+    ) -> AnalysisInputs:
+        """Load every Phase-2 metric row the analysis engines need, once."""
+        return load_analysis_inputs(
+            self.session, index_codes, start, end, self.calc_version
         )
 
     def compute_sector(
@@ -734,7 +494,7 @@ class MetricsService:
                 rows: list[dict] = []
                 for as_of in inputs.as_of_dates():
                     members_by_sector: dict[object, list[dict]] = {}
-                    for instrument_id in _members_on(inputs.intervals.get(index_id, []), as_of):
+                    for instrument_id in members_on(inputs.intervals.get(index_id, []), as_of):
                         technical = inputs.technical_at(instrument_id, as_of)
                         sector_id = inputs.sector_by_instrument.get(instrument_id)
                         if technical is None or sector_id is None:
@@ -790,7 +550,7 @@ class MetricsService:
                 for as_of in inputs.as_of_dates():
                     members: list[dict] = []
                     sector_flags: dict[object, list[bool]] = defaultdict(list)
-                    for instrument_id in _members_on(inputs.intervals.get(index_id, []), as_of):
+                    for instrument_id in members_on(inputs.intervals.get(index_id, []), as_of):
                         technical = inputs.technical_at(instrument_id, as_of)
                         if technical is None:
                             continue
@@ -842,7 +602,7 @@ class MetricsService:
         result = JobResult(run_id=run.id, job_name="compute_horizon", status=RunStatus.RUNNING)
         try:
             inputs = self._analysis_inputs(index_codes, start, end)
-            members = _member_instrument_ids(inputs.intervals)
+            members = member_instrument_ids(inputs.intervals)
             for instrument_id in sorted(members):
                 try:
                     rows: list[dict] = []
@@ -917,7 +677,7 @@ class MetricsService:
             horizon_rows = self._horizon_map(inputs)
             sector_scores = self._sector_score_map(index_codes, inputs.start, inputs.end)
 
-            for instrument_id in sorted(_member_instrument_ids(inputs.intervals)):
+            for instrument_id in sorted(member_instrument_ids(inputs.intervals)):
                 try:
                     rows: list[dict] = []
                     company_id = inputs.company_by_instrument[instrument_id]
@@ -975,7 +735,7 @@ class MetricsService:
             self._fail_run(run, result, exc)
             raise
 
-    def _horizon_map(self, inputs: _AnalysisInputs) -> dict[tuple[int, date], dict]:
+    def _horizon_map(self, inputs: AnalysisInputs) -> dict[tuple[int, date], dict]:
         if not inputs.company_by_instrument:
             return {}
         stmt = select(HorizonMetric).where(
@@ -992,7 +752,7 @@ class MetricsService:
             "horizon_confidence",
         )
         return {
-            (row.instrument_id, row.as_of): _row_dict(row, fields)
+            (row.instrument_id, row.as_of): row_dict(row, fields)
             for row in self.session.scalars(stmt).all()
         }
 
@@ -1013,13 +773,13 @@ class MetricsService:
         instrument_id: int,
         as_of: date,
         index_codes: Sequence[str],
-        inputs: _AnalysisInputs,
+        inputs: AnalysisInputs,
     ) -> int | None:
         for code in index_codes:
             index_id = inputs.index_ids.get(code)
             if index_id is None:
                 continue
-            if instrument_id in _members_on(inputs.intervals.get(index_id, []), as_of):
+            if instrument_id in members_on(inputs.intervals.get(index_id, []), as_of):
                 return index_id
         return None
 
@@ -1073,95 +833,33 @@ class MetricsService:
             for strategy, version in active
         ]
 
-    def _scoring_map(self, inputs: _AnalysisInputs) -> dict[tuple[int, date], dict]:
-        if not inputs.company_by_instrument:
-            return {}
-        stmt = select(ScoringSnapshot).where(
-            ScoringSnapshot.instrument_id.in_(list(inputs.company_by_instrument)),
-            ScoringSnapshot.as_of >= inputs.start,
-            ScoringSnapshot.as_of <= inputs.end,
-            ScoringSnapshot.calc_version == self.calc_version,
+    def _scoring_map(self, inputs: AnalysisInputs) -> dict[tuple[int, date], dict]:
+        return scoring_map(
+            self.session,
+            list(inputs.company_by_instrument),
+            inputs.start,
+            inputs.end,
+            self.calc_version,
         )
-        fields = (
-            "composite_score",
-            "score_label",
-            "preferred_horizon",
-            "trend_score",
-            "momentum_score",
-            "relative_strength_score",
-            "quality_score",
-            "growth_score",
-            "valuation_score",
-            "risk_score",
-            "liquidity_score",
-            "horizon_score",
-            "sector_score",
-        )
-        return {
-            (row.instrument_id, row.as_of): _row_dict(row, fields)
-            for row in self.session.scalars(stmt).all()
-        }
 
     def _regime_map(self, start: date, end: date) -> dict[tuple[int, date], dict]:
-        stmt = select(MarketRegime).where(
-            MarketRegime.as_of >= start,
-            MarketRegime.as_of <= end,
-            MarketRegime.calc_version == self.calc_version,
-        )
-        return {
-            (row.index_id, row.as_of): _row_dict(row, ("regime_score", "regime_label"))
-            for row in self.session.scalars(stmt).all()
-        }
+        return regime_map(self.session, start, end, self.calc_version)
 
     def _sector_state_map(
         self, index_codes: Sequence[str], start: date, end: date
     ) -> dict[tuple[int, object, date], str]:
-        stmt = select(SectorMetric).where(
-            SectorMetric.as_of >= start, SectorMetric.as_of <= end
-        )
-        if not index_codes:
-            return {}
-        return {
-            (row.index_id, row.sector_id, row.as_of): row.sector_state.value
-            for row in self.session.scalars(stmt).all()
-        }
+        return sector_state_map(self.session, index_codes, start, end)
 
     def _signal_context(
         self,
-        inputs: _AnalysisInputs,
+        inputs: AnalysisInputs,
         instrument_id: int,
         as_of: date,
         scoring: dict | None,
         regime: dict | None,
         sector: dict | None,
     ) -> StrategyContext | None:
-        technical = inputs.technical_at(instrument_id, as_of)
-        if technical is None:
-            return None
-        values: dict = {k: v for k, v in technical.items() if k != "as_of"}
-        values.update(inputs.momentum.get((instrument_id, as_of)) or {})
-        values.update(inputs.rs.get((instrument_id, as_of)) or {})
-        values.update(inputs.valuation.get((instrument_id, as_of)) or {})
-        company_id = inputs.company_by_instrument.get(instrument_id)
-        if company_id is not None:
-            values.update(inputs.fundamentals_at(company_id, as_of))
-        if scoring:
-            values.update(scoring)
-        if regime:
-            values.update(regime)
-        if sector:
-            values.update(sector)
-        close = as_float(technical.get("close"))
-        sma20 = as_float(technical.get("sma20"))
-        if close is not None and sma20:
-            values["dist_from_sma20_pct"] = (close / sma20 - 1) * 100
-        return StrategyContext(
-            instrument_id=instrument_id,
-            as_of=as_of,
-            values=values,
-            close=close,
-            atr14=as_float(technical.get("atr14")),
-        )
+        return inputs.strategy_context(instrument_id, as_of, scoring, regime, sector)
 
     def compute_signals(
         self, index_codes: Sequence[str], start: date | None = None, end: date | None = None
@@ -1184,7 +882,7 @@ class MetricsService:
             regime_rows = self._regime_map(inputs.start, inputs.end)
             sector_states = self._sector_state_map(index_codes, inputs.start, inputs.end)
 
-            for instrument_id in sorted(_member_instrument_ids(inputs.intervals)):
+            for instrument_id in sorted(member_instrument_ids(inputs.intervals)):
                 try:
                     rows: list[dict] = []
                     for as_of in inputs.as_of_dates():
@@ -1394,7 +1092,7 @@ class MetricsService:
             raise
 
     # -------------------------------------- tracking, exits, alerts (Phase 5)
-    def _session_dates(self, inputs: _AnalysisInputs) -> dict[int, list[date]]:
+    def _session_dates(self, inputs: AnalysisInputs) -> dict[int, list[date]]:
         dates: dict[int, list[date]] = defaultdict(list)
         for instrument_id, as_of in inputs.technical:
             dates[instrument_id].append(as_of)
@@ -1412,7 +1110,7 @@ class MetricsService:
 
     def _recommendation_context(
         self,
-        inputs: _AnalysisInputs,
+        inputs: AnalysisInputs,
         instrument_id: int,
         as_of: date,
         scoring_rows: dict,
@@ -1474,7 +1172,7 @@ class MetricsService:
         self,
         recommendation: Recommendation,
         as_of: date,
-        inputs: _AnalysisInputs,
+        inputs: AnalysisInputs,
         index_codes: Sequence[str],
         scoring_rows: dict,
         regime_rows: dict,
@@ -1590,7 +1288,7 @@ class MetricsService:
         self,
         recommendation: Recommendation,
         as_of: date,
-        inputs: _AnalysisInputs,
+        inputs: AnalysisInputs,
         index_codes: Sequence[str],
         scoring_rows: dict,
         regime_rows: dict,
@@ -1910,8 +1608,8 @@ class MetricsService:
 
             index_ids = store.ensure_indices(self.session, list(index_codes))
             instrument_ids = sorted(
-                _member_instrument_ids(
-                    _membership_intervals(
+                member_instrument_ids(
+                    membership_intervals(
                         self.session, list(index_codes), date(1900, 1, 1), date(2900, 1, 1)
                     )
                 )

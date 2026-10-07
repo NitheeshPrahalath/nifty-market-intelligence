@@ -352,7 +352,20 @@ def test_phase4_strategies_and_signals(sqlite_session, pointed_at_long_fixtures)
     for signal in breakout:
         entry = next(g for g in signal.rules_result if g["name"] == "entry")
         breakout_condition = next(c for c in entry["conditions"] if c["key"] == "breakout_52w")
-        assert (breakout_condition["status"] == "pass") == (signal.signal_type == "BUY_SETUP")
+        if signal.signal_type == "BUY_SETUP":
+            assert breakout_condition["status"] == "pass"
+        # Precedence is invalidation > exit > entry, so a breakout day can still
+        # be reported as an exit when something stronger is in play. Absent those
+        # stronger groups the entry decides alone, which is the real check.
+        stronger = [
+            g
+            for g in signal.rules_result
+            if g["name"] in ("invalidation", "exit") and g.get("passed") is True
+        ]
+        if not stronger:
+            assert (breakout_condition["status"] == "pass") == (
+                signal.signal_type == "BUY_SETUP"
+            )
 
     # Re-running the EOD chain updates signals in place, never duplicates them.
     before = _count(sqlite_session, Signal)

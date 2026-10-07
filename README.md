@@ -68,6 +68,18 @@ Individual stages (`compute-fundamentals`, `compute-tech`, `compute-momentum`,
 their own, as can the two tracking stages (`track-recommendations`,
 `dispatch-notifications`), which are safe to re-run for a day already covered.
 
+Then backtest the same strategies that were just seeded and emitted signals
+(Phase 6):
+
+```bash
+.venv/bin/nmi backtest --index NIFTY_50 \
+    --start 2024-01-01 --end 2024-06-28 --capital 1000000
+.venv/bin/nmi backtest-walk-forward --index NIFTY_50 \
+    --start 2024-01-01 --end 2024-06-28 --folds 4
+.venv/bin/nmi backtest-list
+.venv/bin/nmi backtest-report 1 --trades
+```
+
 `seed-universe` reads `tests/fixtures/symbols.csv` and
 `tests/fixtures/memberships/index_memberships.csv` by default; point the CSV
 providers anywhere via settings (see `.env.example`).
@@ -123,6 +135,35 @@ providers anywhere via settings (see `.env.example`).
   re-running the chain never re-alerts, and each alert keeps the triggering
   reason, severity and event link.
 
+## Design invariants (Phase 6)
+
+- **The backtest sees the day the signal saw.** Membership intervals, scoring,
+  regime, sector state and technicals are all resolved by `as_of`, and a
+  decision taken on day D is filled at day D+1's open. No future bar, no
+  current-constituent survivorship, no same-bar fill.
+- **One rule implementation for live and backtest.** The engine reads
+  `StrategyVersion.rules` and calls the same view/level helpers the live
+  pipeline does, so a rule edit changes both sides at once — live/backtest
+  parity by construction rather than by discipline.
+- **Every price sits on one axis.** Indicators, strategy anchors, entry zones
+  and simulated fills all use the adjusted basis (raw open/high/low scaled by
+  that bar's own adjustment factor). Mixing raw highs with adjusted closes
+  would shift every ATR-derived level by the split factor, which is exactly the
+  kind of silent scale bug a backtest is worst at revealing.
+- **Costs, slippage, sizing and risk are modelled, not assumed.** Per-side cost
+  and slippage bps, risk-per-trade sizing against the stop distance, position
+  and slot caps, cash and minimum-lot checks, and an explicit rejection reason
+  (`NO_DATA`, `NO_SIGNAL`, `NO_CASH`, `BELOW_LOT`, `NO_FREE_SLOT`,
+  `ALREADY_HELD`, ...) for every day and instrument that did not trade.
+- **Stops beat targets.** When one bar touches both, the stop wins; a gap
+  through a stop fills at the open, not at the stop price. Membership and bars
+  are revalidated at fill time, so an order queued on day D dies if the
+  instrument left the index overnight.
+- **Every run is reproducible and auditable.** A run persists its config,
+  window, metric suite, trades, equity curve and an audit log of engine and
+  database operations; walk-forward windows are child runs of their parent, so
+  an out-of-sample result can always be traced back to what produced it.
+
 ## Providers
 
 Selection is configuration-driven:
@@ -136,10 +177,12 @@ Selection is configuration-driven:
 
 ## Tests
 
-212 tests covering: adjustment math (splits, bonus, dividends, combined),
+279 tests covering: adjustment math (splits, bonus, dividends, combined),
 validation rules, normalization, CSV providers, membership interval semantics,
 indicator/metric math, regime/sector/horizon/scoring, the strategy rule engine,
-the tracking engines (thesis, exits, lifecycle, notifications), the end-to-end
+the tracking engines (thesis, exits, lifecycle, notifications), the Phase-6
+backtester (as-of dataset, event-driven fills, costs, sizing, exit handling, the
+metric suite, walk-forward), the Alembic migration graph, the end-to-end
 pipeline on a real SQLite database (seeding → backfill → signals →
 recommendations → tracking → notifications → closure) and the CLI. Run
 `make test`.
