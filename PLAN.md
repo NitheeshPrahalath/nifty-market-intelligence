@@ -124,5 +124,5 @@ never a plain BUY/SELL generator.
 - [x] **P6 Backtesting Engine**
 - [x] **P7 API Backend**
 - [x] **P8 Frontend Dashboard**
-- [ ] P9 AI Explanations Layer
+- [x] **P9 AI Explanations Layer**
 - [ ] P10 Production Hardening

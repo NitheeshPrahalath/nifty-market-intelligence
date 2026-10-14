@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 
+import { ExplanationPanel } from "@/components/explanation-panel";
 import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { StatCard } from "@/components/stat-card";
 import { ThesisPanel } from "@/components/thesis-panel";
@@ -99,6 +100,8 @@ export default function RecommendationDetailPage() {
           ) : null}
         </CardContent>
       </Card>
+
+      <ExplanationPanel id={id} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>

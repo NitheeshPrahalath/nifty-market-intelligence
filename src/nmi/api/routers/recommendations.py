@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 
 from nmi.api import service
 from nmi.api.deps import Page, get_db, get_page
+from nmi.api.schemas import ExplanationView, RecommendationDetail, RecommendationRow
 from nmi.api.schemas import Page as PageModel
-from nmi.api.schemas import RecommendationDetail, RecommendationRow
 
 router = APIRouter(tags=["recommendations"])
 
@@ -57,3 +57,23 @@ def recommendation_detail(
     if detail is None:
         raise HTTPException(status_code=404, detail=f"unknown recommendation {recommendation_id}")
     return detail
+
+
+@router.get(
+    "/recommendations/{recommendation_id}/explanation",
+    response_model=ExplanationView,
+)
+def recommendation_explanation(
+    recommendation_id: int,
+    kind: Annotated[
+        str | None, Query(description="thesis|change|research; latest across kinds if omitted")
+    ] = None,
+    db: Annotated[Session, Depends(get_db)] = None,  # type: ignore[assignment]
+) -> ExplanationView:
+    explanation = service.recommendation_explanation(db, recommendation_id, kind)
+    if explanation is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no explanation for recommendation {recommendation_id}",
+        )
+    return explanation

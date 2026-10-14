@@ -87,4 +87,26 @@ describe("api client", () => {
 
     expect(mockFetch.mock.calls[0][0]).toBe("/api/v1/stocks/M%26M");
   });
+
+  it("requests an explanation with the optional kind filter", async () => {
+    const mockFetch = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ headline: "x" }),
+    );
+    vi.stubGlobal("fetch", mockFetch);
+
+    await api.explanation(7, "change");
+
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      "/api/v1/recommendations/7/explanation?kind=change",
+    );
+  });
+
+  it("returns null when no explanation has been generated yet", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ detail: "not found" }, 404)),
+    );
+
+    await expect(api.explanation(7)).resolves.toBeNull();
+  });
 });

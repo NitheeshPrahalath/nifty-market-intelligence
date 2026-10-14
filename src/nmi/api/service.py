@@ -22,6 +22,9 @@ from nmi.api.schemas import (
     BacktestTradeView,
     CompanyView,
     EquityPointView,
+    ExplanationBulletView,
+    ExplanationCitationView,
+    ExplanationView,
     HorizonView,
     IndexRef,
     MarketOverview,
@@ -788,6 +791,50 @@ def list_recommendations(
         for rec, instrument, company in session.execute(stmt).all()
     ]
     return items, int(total)
+
+
+def recommendation_explanation(
+    session: Session, recommendation_id: int, kind: str | None = None
+) -> ExplanationView | None:
+    """The latest stored AI explanation for a recommendation, if any."""
+    from nmi.explain import service as explain_service
+
+    explanation = explain_service.get_latest_explanation(session, recommendation_id, kind)
+    if explanation is None:
+        return None
+    return ExplanationView(
+        recommendation_id=explanation.recommendation_id,
+        kind=explanation.kind,
+        as_of=explanation.as_of,
+        headline=explanation.headline,
+        summary=explanation.summary,
+        bullets=[
+            ExplanationBulletView(text=bullet.text, citations=bullet.citations)
+            for bullet in explanation.bullets
+        ],
+        risks=[
+            ExplanationBulletView(text=risk.text, citations=risk.citations)
+            for risk in explanation.risks
+        ],
+        citations=[
+            ExplanationCitationView(
+                key=citation.key,
+                label=citation.label,
+                value=citation.value,
+                group=citation.group,
+                source=citation.source,
+            )
+            for citation in explanation.citations
+        ],
+        provider=explanation.provider,
+        model=explanation.model,
+        prompt_version=explanation.prompt_version,
+        source_hash=explanation.source_hash,
+        generated_at=explanation.generated_at,
+        fallback_reason=explanation.fallback_reason,
+        valid=explanation.valid,
+        validation_errors=explanation.validation_errors,
+    )
 
 
 def recommendation_detail(session: Session, recommendation_id: int) -> RecommendationDetail | None:

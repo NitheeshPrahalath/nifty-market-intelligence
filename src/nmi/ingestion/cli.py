@@ -30,6 +30,7 @@ Examples
     nmi backtest-report 1 --trades
     nmi serve --host 0.0.0.0 --port 8000
     nmi audit-prune --older-than-days 30
+    nmi explain --index NIFTY_50 --kind thesis
 """
 
 from __future__ import annotations
@@ -567,6 +568,67 @@ def audit_prune(
         removed = service.prune_audit(session, days)
         session.commit()
     typer.secho(f"pruned {removed} audit rows", fg=typer.colors.GREEN)
+
+
+@app.command()
+def explain(
+    recommendation_id: str | None = typer.Option(
+        None, "--recommendation-id", help="Comma-separated recommendation ids"
+    ),
+    index: str | None = typer.Option(None, "--index", help="Limit to an index's open ideas"),
+    kind: str = typer.Option("thesis", "--kind", help="thesis|change|research"),
+    provider: str | None = typer.Option(
+        None, "--provider", help="template|openai (defaults to EXPLAIN_PROVIDER)"
+    ),
+    include_closed: bool = typer.Option(False, "--include-closed"),
+    force: bool = typer.Option(False, "--force", help="Regenerate even if already stored"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Write cited, audited natural-language explanations for recommendations.
+
+    Every number in the output traces to a named fact; a provider that invents
+    one is rejected in favour of the deterministic template writer.
+    """
+    from nmi.explain import service as explain_service
+    from nmi.explain.provider import get_provider
+
+    ids = (
+        [int(part) for part in recommendation_id.split(",") if part.strip()]
+        if recommendation_id
+        else None
+    )
+    chooser = get_provider(provider)
+    with _sessionctx(db_url) as session:
+        recommendations = explain_service.select_recommendations(
+            session,
+            recommendation_ids=ids,
+            index_code=index,
+            include_closed=include_closed,
+        )
+        if not recommendations:
+            typer.secho("no recommendations matched", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1)
+        results = explain_service.generate_explanations(
+            session, recommendations, kind, provider=chooser, force=force
+        )
+
+    written = 0
+    for rec, explanation in results:
+        if explanation is None:
+            continue
+        written += 1
+        flag = "" if explanation.valid else " [INVALID]"
+        fallback = (
+            f" (fallback: {explanation.fallback_reason})"
+            if explanation.fallback_reason
+            else ""
+        )
+        typer.secho(
+            f"#{rec.id} {explanation.headline}{flag}{fallback}",
+            fg=typer.colors.GREEN if explanation.valid else typer.colors.YELLOW,
+        )
+        typer.echo(f"    {explanation.summary}")
+    typer.secho(f"wrote {written} {kind} explanation(s)", fg=typer.colors.GREEN)
 
 
 def _echo_backtest_trades(trades) -> None:

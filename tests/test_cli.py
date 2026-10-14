@@ -70,6 +70,12 @@ def test_cli_exposes_phase_6_commands():
         assert command in r.output
 
 
+def test_cli_exposes_phase_9_commands():
+    r = runner.invoke(cli.app, ["--help"])
+    assert r.exit_code == 0
+    assert "explain" in r.output
+
+
 def test_cli_backtest_runs_and_reports_against_a_real_db(
     tmp_path, pointed_at_long_fixtures
 ):
@@ -113,6 +119,13 @@ def test_cli_backtest_runs_and_reports_against_a_real_db(
     assert r.exit_code == 0, r.output
     assert "window" in r.output
     assert "consistency" in r.output
+
+    # Phase 9: explanations are written from the tracked recommendations.
+    r = runner.invoke(
+        cli.app, ["explain", "--index", "NIFTY_50", "--kind", "thesis", "--db-url", db_url]
+    )
+    assert r.exit_code == 0, r.output
+    assert "explanation(s)" in r.output
 
     # An unknown id is an error, not an empty success.
     r = runner.invoke(cli.app, ["backtest-report", "999", "--db-url", db_url])

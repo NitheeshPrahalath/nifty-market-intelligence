@@ -66,6 +66,16 @@ class Settings(BaseSettings):
     api_audit_retention_days: int = 90
     redis_url: str | None = None
 
+    # AI explanations layer (Phase 9). "template" is the deterministic,
+    # offline provider and the fallback for every other provider.
+    explain_provider: str = "template"
+    explain_model: str = "gpt-4o-mini"
+    explain_base_url: str = "https://api.openai.com/v1"
+    explain_api_key: str | None = None
+    explain_timeout_seconds: float = 30.0
+    explain_max_tokens: int = 800
+    explain_temperature: float = 0.2
+
     @property
     def sqlite_in_memory(self) -> str:
         return "sqlite+pysqlite:///:memory:"

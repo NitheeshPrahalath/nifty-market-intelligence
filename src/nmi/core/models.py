@@ -1608,3 +1608,56 @@ class ApiRequest(Base):
     duration_ms: Mapped[float] = mapped_column(Numeric(12, 3), default=0, nullable=False)
     cache_hit: Mapped[bool] = mapped_column(default=False, nullable=False)
     client_ip: Mapped[str | None] = mapped_column(String(64))
+
+
+class Explanation(Base):
+    """Audited natural-language explanation of a recommendation (Phase 9).
+
+    One row per (recommendation, kind, source facts, provider, model, prompt
+    version): the same inputs never produce a duplicate, but any change to the
+    underlying facts produces a new, immutable row. Every number in the prose is
+    backed by a ``citations`` entry, and ``valid`` records whether the citation
+    checker accepted it — a rejected AI draft is stored, not silently dropped.
+    """
+
+    __tablename__ = "explanations"
+    __table_args__ = (
+        UniqueConstraint(
+            "recommendation_id",
+            "kind",
+            "source_hash",
+            "provider",
+            "model",
+            "prompt_version",
+            name="uq_explanation_identity",
+        ),
+        SqlIndex("ix_explanation_rec_kind", "recommendation_id", "kind"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recommendation_id: Mapped[int] = mapped_column(
+        ForeignKey("recommendations.id"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(96), nullable=False, default="")
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False, default="v1")
+    source_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    headline: Mapped[str] = mapped_column(Text, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    bullets: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    risks: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    citations: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    fallback_reason: Mapped[str | None] = mapped_column(Text)
+    valid: Mapped[bool] = mapped_column(default=True, nullable=False)
+    validation_errors: Mapped[list[Any]] = mapped_column(JSON, default=list, nullable=False)
+    raw_response: Mapped[str | None] = mapped_column(Text)
+    calc_version: Mapped[str] = mapped_column(String(32), nullable=False, default="v1")
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )

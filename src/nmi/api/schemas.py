@@ -300,6 +300,40 @@ class RecommendationDetail(RecommendationRow):
     thesis: list[ThesisView]
 
 
+class ExplanationBulletView(BaseModel):
+    text: str
+    citations: list[str] = Field(default_factory=list)
+
+
+class ExplanationCitationView(BaseModel):
+    key: str
+    label: str
+    value: str
+    group: str = "score"
+    source: str = ""
+
+
+class ExplanationView(BaseModel):
+    """A stored, audited explanation of a recommendation (Phase 9)."""
+
+    recommendation_id: int
+    kind: str
+    as_of: date
+    headline: str
+    summary: str
+    bullets: list[ExplanationBulletView] = Field(default_factory=list)
+    risks: list[ExplanationBulletView] = Field(default_factory=list)
+    citations: list[ExplanationCitationView] = Field(default_factory=list)
+    provider: str
+    model: str
+    prompt_version: str
+    source_hash: str
+    generated_at: datetime
+    fallback_reason: str | None = None
+    valid: bool = True
+    validation_errors: list[str] = Field(default_factory=list)
+
+
 class AlertView(BaseModel):
     id: int
     notification_type: str

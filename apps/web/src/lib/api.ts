@@ -1,5 +1,6 @@
 import type {
   AlertView,
+  ExplanationView,
   HealthResponse,
   MarketOverview,
   Page,
@@ -135,6 +136,21 @@ export const api = {
 
   recommendation: (id: number, signal?: AbortSignal) =>
     fetchJson<RecommendationDetail>(`/api/v1/recommendations/${id}`, { signal }),
+
+  /** The stored AI explanation, or null when none has been written yet. */
+  explanation: async (id: number, kind?: string, signal?: AbortSignal) => {
+    try {
+      return await fetchJson<ExplanationView>(
+        `/api/v1/recommendations/${id}/explanation${buildQuery({ kind })}`,
+        { signal },
+      );
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  },
 
   alerts: (
     params: {

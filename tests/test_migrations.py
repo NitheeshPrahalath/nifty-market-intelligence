@@ -25,6 +25,7 @@ from nmi.core.db import Base
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PHASE_6_REVISION = "a4c7e2b18d93"
 PHASE_7_REVISION = "e7b3c1a9f204"
+PHASE_9_REVISION = "f9a2c4e6b8d0"
 
 
 def _alembic_config(db_url: str) -> Config:
@@ -131,3 +132,41 @@ def test_the_phase_7_api_audit_table_is_created_and_dropped(migrated_db):
     command.upgrade(config, "head")
     after_up = set(inspect(create_engine(migrated_db)).get_table_names())
     assert "api_requests" in after_up
+
+
+def test_the_phase_9_explanations_table_is_created_and_dropped(migrated_db):
+    config = _alembic_config(migrated_db)
+    inspector = inspect(create_engine(migrated_db))
+    assert "explanations" in inspector.get_table_names()
+    columns = _columns(inspector, "explanations")
+    assert set(columns) == {
+        "id",
+        "recommendation_id",
+        "kind",
+        "as_of",
+        "provider",
+        "model",
+        "prompt_version",
+        "source_hash",
+        "headline",
+        "summary",
+        "bullets",
+        "risks",
+        "citations",
+        "fallback_reason",
+        "valid",
+        "validation_errors",
+        "raw_response",
+        "calc_version",
+        "created_at",
+        "updated_at",
+    }
+
+    command.downgrade(config, PHASE_7_REVISION)
+    after_down = set(inspect(create_engine(migrated_db)).get_table_names())
+    assert "explanations" not in after_down
+    assert "api_requests" in after_down  # the Phase-7 table is untouched
+
+    command.upgrade(config, PHASE_9_REVISION)
+    after_up = set(inspect(create_engine(migrated_db)).get_table_names())
+    assert "explanations" in after_up

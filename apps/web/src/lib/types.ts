@@ -290,6 +290,38 @@ export interface RecommendationDetail extends Omit<RecommendationRow, "thesis"> 
   thesis: ThesisView[];
 }
 
+export interface ExplanationBulletView {
+  text: string;
+  citations: string[];
+}
+
+export interface ExplanationCitationView {
+  key: string;
+  label: string;
+  value: string;
+  group: string;
+  source: string;
+}
+
+export interface ExplanationView {
+  recommendation_id: number;
+  kind: string;
+  as_of: string;
+  headline: string;
+  summary: string;
+  bullets: ExplanationBulletView[];
+  risks: ExplanationBulletView[];
+  citations: ExplanationCitationView[];
+  provider: string;
+  model: string;
+  prompt_version: string;
+  source_hash: string;
+  generated_at: string;
+  fallback_reason: string | null;
+  valid: boolean;
+  validation_errors: string[];
+}
+
 export interface AlertView {
   id: number;
   notification_type: string;

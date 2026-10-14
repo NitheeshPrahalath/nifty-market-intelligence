@@ -4,7 +4,7 @@ Explainable, auditable, backtestable decision-support platform for the Indian
 equity market (Nifty 50 / Midcap 150 / Smallcap 250). See `PLAN.md` for the
 phased roadmap.
 
-**Current status: Phase 8 (Next.js dashboard over the read-only API).**
+**Current status: Phase 9 (cited, audited AI explanations layer).**
 
 ## Repository layout
 
@@ -34,6 +34,7 @@ src/nmi/
   tracking/              # thesis snapshots, exit engines, lifecycle, notifications
   backtest/              # as-of event-driven backtester + metric suite
   api/                   # Phase 7 read-only REST API (routers, gateway, schemas)
+  explain/               # Phase 9 cited AI explanations (facts, prompts, providers, audit)
 alembic/                 # schema migrations
 tests/                   # unit + integration tests
 data/                    # (git-ignored) raw/processed data, sample files in tests/fixtures
@@ -96,6 +97,7 @@ curl -s 'localhost:8000/api/v1/market/overview?index=NIFTY_50'
 curl -s 'localhost:8000/api/v1/screener?index=NIFTY_50&page_size=10'
 curl -s localhost:8000/api/v1/stocks/TCS
 curl -s localhost:8000/api/v1/recommendations
+curl -s 'localhost:8000/api/v1/recommendations/1/explanation'  # 404 until `nmi explain` runs
 ```
 
 Auth, rate limiting and response caching are off/default for local use; set
@@ -125,6 +127,23 @@ is not exposed to the client. Five surfaces are covered — market overview,
 screener, stock detail, recommendation dashboard and alert centre — each with
 explicit loading / empty / error states, and `—` is rendered wherever the API
 reports a missing input rather than a fabricated zero.
+
+Generate cited natural-language explanations (Phase 9) for tracked
+recommendations:
+
+```bash
+.venv/bin/nmi explain --index NIFTY_50                 # thesis (default), template provider
+.venv/bin/nmi explain --index NIFTY_50 --kind change   # what changed since the baseline
+.venv/bin/nmi explain --recommendation-id 1,2 --force  # specific ids, regenerate
+```
+
+The default `template` provider is deterministic and offline; set
+`EXPLAIN_PROVIDER=openai`, `EXPLAIN_API_KEY` (and optionally `EXPLAIN_MODEL`,
+`EXPLAIN_BASE_URL`) to call any OpenAI-compatible `/chat/completions` endpoint.
+Every generated explanation is validated for citation coverage and stored in
+`explanations`, then served read-only at
+`GET /api/v1/recommendations/{id}/explanation?kind=thesis|change|research` and
+rendered on the recommendation page in the dashboard.
 
 ## Design invariants (Phase 1)
 
@@ -251,6 +270,25 @@ reports a missing input rather than a fabricated zero.
   so `PriceChart` imports it inside an effect against a plain div rather than at
   module scope, keeping the route prerenderable.
 
+## Design invariants (Phase 9)
+
+- **No invented numbers.** A fact sheet is built first (as-of levels, scores,
+  factors, thesis deltas, events); every numeric token the model emits must trace
+  back to a cited fact, or the draft is rejected. A model cannot smuggle in a
+  price it was not handed.
+- **Facts are the single source of truth.** `source_hash` is the hash of the
+  canonical fact sheet, so an explanation is cached by `(recommendation, kind,
+  source_hash)` and reused until the underlying facts change — never staleness by
+  date alone, and never a re-run that silently contradicts the stored one.
+- **The LLM is optional and swappable.** Providers sit behind one protocol; the
+  `template` provider is deterministic and offline, so the pipeline, tests and API
+  work with no key or network. A provider failure or a citation failure degrades
+  to the template with a recorded `fallback_reason` rather than surfacing nothing.
+- **Every explanation is auditable.** Provider, model, prompt version, source
+  hash, raw response, validation result and any fallback are persisted in
+  `explanations`; the API and dashboard show which provider produced a summary and
+  whether it passed citation validation.
+
 ## Providers
 
 Selection is configuration-driven:
@@ -261,21 +299,24 @@ Selection is configuration-driven:
 | corporate actions   | `CORPORATE_ACTION_PROVIDER`    | csv             |
 | index membership    | `INDEX_MEMBERSHIP_PROVIDER`    | csv             |
 | fundamentals        | `FUNDAMENTAL_PROVIDER`         | csv             |
+| AI explanations     | `EXPLAIN_PROVIDER`             | template, openai |
 
 ## Tests
 
-303 tests covering: adjustment math (splits, bonus, dividends, combined),
+331 tests covering: adjustment math (splits, bonus, dividends, combined),
 validation rules, normalization, CSV providers, membership interval semantics,
 indicator/metric math, regime/sector/horizon/scoring, the strategy rule engine,
 the tracking engines (thesis, exits, lifecycle, notifications), the Phase-6
 backtester (as-of dataset, event-driven fills, costs, sizing, exit handling, the
 metric suite, walk-forward), the Phase-7 API (auth on/off, rate limiting,
 response caching, audit logging, pagination, the typed data endpoints), the
-Alembic migration graph, the end-to-end pipeline on a real SQLite database
-(seeding → backfill → signals → recommendations → tracking → notifications →
-closure) and the CLI. Run `make test`.
+Phase-9 explanation layer (fact sheets, citation validation, providers, caching
+and fallback, the explanation endpoint), the Alembic migration graph, the
+end-to-end pipeline on a real SQLite database (seeding → backfill → signals →
+recommendations → tracking → notifications → explanations → closure) and the CLI.
+Run `make test`.
 
-The Phase-8 dashboard has its own suite (28 Vitest tests over the API client,
+The Phase-8 dashboard has its own suite (30 Vitest tests over the API client,
 formatters, screener table and pagination) plus a strict `tsc` typecheck and a
 production `next build`. Run `make web-test`, `make web-typecheck` and
 `make web-build`.

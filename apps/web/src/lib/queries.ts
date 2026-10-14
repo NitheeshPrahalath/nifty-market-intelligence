@@ -16,6 +16,8 @@ export const queryKeys = {
     ["stock", symbol, "prices", params] as const,
   recommendations: (params: object) => ["recommendations", params] as const,
   recommendation: (id: number) => ["recommendation", id] as const,
+  explanation: (id: number, kind?: string) =>
+    ["recommendation", id, "explanation", kind ?? "latest"] as const,
   alerts: (params: object) => ["alerts", params] as const,
 };
 
@@ -85,6 +87,15 @@ export function useRecommendation(id: number) {
   return useQuery({
     queryKey: queryKeys.recommendation(id),
     queryFn: ({ signal }) => api.recommendation(id, signal),
+    staleTime: DEFAULT_STALE_MS,
+    enabled: Number.isFinite(id),
+  });
+}
+
+export function useExplanation(id: number, kind?: string) {
+  return useQuery({
+    queryKey: queryKeys.explanation(id, kind),
+    queryFn: ({ signal }) => api.explanation(id, kind, signal),
     staleTime: DEFAULT_STALE_MS,
     enabled: Number.isFinite(id),
   });
