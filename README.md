@@ -27,6 +27,8 @@ src/nmi/
   metrics/service.py     # EOD orchestrator: one audited job per stage
   strategies/            # versioned rule engine + catalog
   tracking/              # thesis snapshots, exit engines, lifecycle, notifications
+  backtest/              # as-of event-driven backtester + metric suite
+  api/                   # Phase 7 read-only REST API (routers, gateway, schemas)
 alembic/                 # schema migrations
 tests/                   # unit + integration tests
 data/                    # (git-ignored) raw/processed data, sample files in tests/fixtures
@@ -79,6 +81,23 @@ Then backtest the same strategies that were just seeded and emitted signals
 .venv/bin/nmi backtest-list
 .venv/bin/nmi backtest-report 1 --trades
 ```
+
+Then serve the read-only API (Phase 7):
+
+```bash
+.venv/bin/nmi serve --host 127.0.0.1 --port 8000     # OpenAPI docs at /docs
+curl -s localhost:8000/health
+curl -s 'localhost:8000/api/v1/market/overview?index=NIFTY_50'
+curl -s 'localhost:8000/api/v1/screener?index=NIFTY_50&page_size=10'
+curl -s localhost:8000/api/v1/stocks/TCS
+curl -s localhost:8000/api/v1/recommendations
+```
+
+Auth, rate limiting and response caching are off/default for local use; set
+`API_AUTH_ENABLED=true` with `API_KEYS=[...]` to require a key (`X-API-Key` or
+`Authorization: Bearer`), `API_RATE_LIMIT_PER_MINUTE` to bound callers, and
+`REDIS_URL` for a shared cache/limiter. Every request is audited in
+`api_requests`; `nmi audit-prune` trims rows older than the retention window.
 
 `seed-universe` reads `tests/fixtures/symbols.csv` and
 `tests/fixtures/memberships/index_memberships.csv` by default; point the CSV
@@ -164,6 +183,30 @@ providers anywhere via settings (see `.env.example`).
   database operations; walk-forward windows are child runs of their parent, so
   an out-of-sample result can always be traced back to what produced it.
 
+## Design invariants (Phase 7)
+
+- **Every view is as-of.** The API resolves membership, scores, signals and
+  levels for the requested date, never "now", so a historical question gets the
+  historical answer and a dashboard cannot quietly show today's constituents
+  against last quarter's recommendation.
+- **The query layer is HTTP-free.** Routers translate HTTP to calls on
+  `nmi.api.service`, a set of plain functions over a `Session` returning typed
+  schemas. The gateway owns auth, limiting, caching and audit; neither side needs
+  to know about the other, and the query layer is unit-tested without a client.
+- **Cross-cutting concerns share one pass.** `GatewayMiddleware` authenticates
+  (`X-API-Key` or `Authorization: Bearer`, constant-time compare), applies the
+  per-principal fixed-window rate limit, serves the response cache (keyed on the
+  full request target *and* the principal, so one tenant never sees another's
+  body) and writes the audit row — because they share the same per-request facts.
+- **Auditing never breaks serving.** Audit writes are best-effort and the
+  principal stored is a short non-reversible key label, never the key itself.
+  `/health` and `/audit` are never cached; every response carries `X-Request-Id`
+  and `X-Cache`, and a 429 carries `Retry-After`.
+- **Redis is an optimisation, never a dependency.** Cache and limiter use a tiny
+  KV abstraction that defaults to an in-process store and degrades to a miss (or
+  an allowed request) if Redis is unset or unreachable, so a missing cache box
+  slows the API rather than taking it down.
+
 ## Providers
 
 Selection is configuration-driven:
@@ -177,12 +220,13 @@ Selection is configuration-driven:
 
 ## Tests
 
-279 tests covering: adjustment math (splits, bonus, dividends, combined),
+303 tests covering: adjustment math (splits, bonus, dividends, combined),
 validation rules, normalization, CSV providers, membership interval semantics,
 indicator/metric math, regime/sector/horizon/scoring, the strategy rule engine,
 the tracking engines (thesis, exits, lifecycle, notifications), the Phase-6
 backtester (as-of dataset, event-driven fills, costs, sizing, exit handling, the
-metric suite, walk-forward), the Alembic migration graph, the end-to-end
-pipeline on a real SQLite database (seeding → backfill → signals →
-recommendations → tracking → notifications → closure) and the CLI. Run
-`make test`.
+metric suite, walk-forward), the Phase-7 API (auth on/off, rate limiting,
+response caching, audit logging, pagination, the typed data endpoints), the
+Alembic migration graph, the end-to-end pipeline on a real SQLite database
+(seeding → backfill → signals → recommendations → tracking → notifications →
+closure) and the CLI. Run `make test`.

@@ -24,6 +24,7 @@ from nmi.core.db import Base
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PHASE_6_REVISION = "a4c7e2b18d93"
+PHASE_7_REVISION = "e7b3c1a9f204"
 
 
 def _alembic_config(db_url: str) -> Config:
@@ -101,3 +102,32 @@ def test_the_phase_6_tables_are_created_and_dropped(migrated_db, tmp_path):
     command.upgrade(config, PHASE_6_REVISION)
     after_up = set(inspect(create_engine(migrated_db)).get_table_names())
     assert phase_6_tables <= after_up
+
+
+def test_the_phase_7_api_audit_table_is_created_and_dropped(migrated_db):
+    config = _alembic_config(migrated_db)
+    command.upgrade(config, "head")
+    inspector = inspect(create_engine(migrated_db))
+    assert "api_requests" in inspector.get_table_names()
+    columns = _columns(inspector, "api_requests")
+    assert set(columns) == {
+        "id",
+        "requested_at",
+        "principal",
+        "method",
+        "path",
+        "query",
+        "status_code",
+        "duration_ms",
+        "cache_hit",
+        "client_ip",
+    }
+
+    command.downgrade(config, PHASE_6_REVISION)
+    after_down = set(inspect(create_engine(migrated_db)).get_table_names())
+    assert "api_requests" not in after_down
+    assert "backtest_runs" in after_down  # the Phase-6 tables are untouched
+
+    command.upgrade(config, "head")
+    after_up = set(inspect(create_engine(migrated_db)).get_table_names())
+    assert "api_requests" in after_up

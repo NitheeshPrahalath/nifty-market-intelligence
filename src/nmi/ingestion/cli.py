@@ -28,6 +28,8 @@ Examples
     nmi backtest-walk-forward --index NIFTY_50 --start 2024-01-01 --end 2025-06-30 --folds 4
     nmi backtest-list
     nmi backtest-report 1 --trades
+    nmi serve --host 0.0.0.0 --port 8000
+    nmi audit-prune --older-than-days 30
 """
 
 from __future__ import annotations
@@ -526,6 +528,45 @@ def backtest_report(
         _echo_backtest_summary(summary)
     if trade_rows is not None:
         _echo_backtest_trades(trade_rows)
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port"),
+    reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes (dev)"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Run the read-only HTTP API with uvicorn.
+
+    Docs are served at ``/docs``; every endpoint lives under ``/api/v1`` except
+    ``/health``. Auth, rate limiting and caching are configured via ``API_*``
+    environment variables (see ``.env.example``).
+    """
+    import os
+
+    import uvicorn
+
+    if db_url:
+        # Also export it so a ``--reload`` child process constructs the same engine.
+        os.environ["DATABASE_URL"] = db_url
+        init_engine(url=db_url)
+    uvicorn.run("nmi.api.app:app", host=host, port=port, reload=reload)
+
+
+@app.command()
+def audit_prune(
+    older_than_days: int = typer.Option(None, "--older-than-days"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Delete API audit rows older than the retention window."""
+    from nmi.api import service
+
+    days = older_than_days if older_than_days is not None else settings.api_audit_retention_days
+    with _sessionctx(db_url) as session:
+        removed = service.prune_audit(session, days)
+        session.commit()
+    typer.secho(f"pruned {removed} audit rows", fg=typer.colors.GREEN)
 
 
 def _echo_backtest_trades(trades) -> None:

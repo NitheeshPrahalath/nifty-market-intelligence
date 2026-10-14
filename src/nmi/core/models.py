@@ -9,6 +9,7 @@ The platform keeps each responsibility in its own entity family:
 * fundamentals derived  -> FundamentalMetric
 * pipeline audit        -> IngestionRun, IngestionError
 * historical simulation -> BacktestRun, BacktestTrade, BacktestEquityPoint
+* API request audit     -> ApiRequest
 
 Time-series rows always carry dates/timestamps. Historical analytical data is
 never overwritten in place; later phases add version-aware tables.
@@ -1578,3 +1579,32 @@ class BacktestRejection(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
+
+
+class ApiRequest(Base):
+    """One served HTTP request, for auth, quota and audit trails (Phase 7).
+
+    Deliberately append-only and free of secrets: the principal is the
+    authenticated key *name*, never the key itself, and the query string is
+    stored without credentials.
+    """
+
+    __tablename__ = "api_requests"
+    __table_args__ = (
+        SqlIndex("ix_api_request_time", "requested_at"),
+        SqlIndex("ix_api_request_principal", "principal"),
+        SqlIndex("ix_api_request_path", "path"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    principal: Mapped[str] = mapped_column(String(64), nullable=False, default="anonymous")
+    method: Mapped[str] = mapped_column(String(8), nullable=False)
+    path: Mapped[str] = mapped_column(String(256), nullable=False)
+    query: Mapped[str | None] = mapped_column(String(512))
+    status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[float] = mapped_column(Numeric(12, 3), default=0, nullable=False)
+    cache_hit: Mapped[bool] = mapped_column(default=False, nullable=False)
+    client_ip: Mapped[str | None] = mapped_column(String(64))

@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     # Ingestion retries (tenacity).
     ingest_retry_max: int = 3
 
+    # API layer (Phase 7).
+    api_title: str = "Nifty Market Intelligence API"
+    api_version: str = "v1"
+    api_prefix: str = "/api/v1"
+    api_auth_enabled: bool = False
+    api_keys: list[str] = []
+    api_rate_limit_per_minute: int = 120
+    api_cache_ttl_seconds: int = 60
+    api_audit_enabled: bool = True
+    api_audit_retention_days: int = 90
+    redis_url: str | None = None
+
     @property
     def sqlite_in_memory(self) -> str:
         return "sqlite+pysqlite:///:memory:"
