@@ -4,12 +4,17 @@ Explainable, auditable, backtestable decision-support platform for the Indian
 equity market (Nifty 50 / Midcap 150 / Smallcap 250). See `PLAN.md` for the
 phased roadmap.
 
-**Current status: Phase 5 (Tracking, Thesis Monitoring, Exit, Notifications).**
+**Current status: Phase 8 (Next.js dashboard over the read-only API).**
 
 ## Repository layout
 
 ```
-apps/                    # FastAPI + Next.js dashboards (Phase 7/8)
+apps/
+  web/                   # Phase 8 Next.js dashboard (App Router, TS, Tailwind)
+    src/app/             # market overview, screener, stock, recommendations, alerts
+    src/components/      # ui kit + feature components (charts, tables, panels)
+    src/lib/             # typed API client, domain types, React Query hooks
+    src/store/           # Zustand UI state (selected index)
 libs/                    # shared libraries (next to nmi.core)
 services/                # analysis, strategies, backtest, notify (Phase 2+)
 src/nmi/
@@ -102,6 +107,24 @@ Auth, rate limiting and response caching are off/default for local use; set
 `seed-universe` reads `tests/fixtures/symbols.csv` and
 `tests/fixtures/memberships/index_memberships.csv` by default; point the CSV
 providers anywhere via settings (see `.env.example`).
+
+Then run the dashboard (Phase 8), with the API from the step above still
+running:
+
+```bash
+make web-install       # npm install in apps/web
+make web-dev           # next dev on http://localhost:3000
+# or a production build:
+make web-build && npm --prefix apps/web run start
+```
+
+The browser only ever calls the dashboard's own origin; Next proxies `/api/v1/*`
+and `/health` to the API server-side (set `API_PROXY_TARGET`, default
+`http://127.0.0.1:8000`), so the API needs no CORS configuration and its origin
+is not exposed to the client. Five surfaces are covered — market overview,
+screener, stock detail, recommendation dashboard and alert centre — each with
+explicit loading / empty / error states, and `—` is rendered wherever the API
+reports a missing input rather than a fabricated zero.
 
 ## Design invariants (Phase 1)
 
@@ -207,6 +230,27 @@ providers anywhere via settings (see `.env.example`).
   an allowed request) if Redis is unset or unreachable, so a missing cache box
   slows the API rather than taking it down.
 
+## Design invariants (Phase 8)
+
+- **The API origin never reaches the browser.** Next rewrites `/api/v1/*` and
+  `/health` to `API_PROXY_TARGET` server-side, so the client calls its own
+  origin: no CORS on the API, no backend URL in the bundle, and only
+  `NEXT_PUBLIC_API_BASE_URL` can opt out for split hosting.
+- **Types are hand-written, not generated.** `src/lib/types.ts` mirrors the
+  Pydantic schemas, so a changed contract fails `tsc` at build time instead of
+  surfacing as a runtime `undefined` — the dashboard cannot compile against a
+  shape the API no longer serves.
+- **Missing is shown as missing.** The backend emits `null` (never a fabricated
+  zero) for absent inputs, and the formatters render `—`; "no data yet" and a
+  real `0.00` stay visually distinct.
+- **Server state and UI state are separated.** TanStack Query owns everything
+  fetched (as-of keyed, `keepPreviousData` while paginating, one shared 60s stale
+  window); Zustand holds only ephemeral UI state (the selected index shared
+  across pages). Neither duplicates the other.
+- **Charts are client-only and SSR-safe.** `lightweight-charts` touches the DOM,
+  so `PriceChart` imports it inside an effect against a plain div rather than at
+  module scope, keeping the route prerenderable.
+
 ## Providers
 
 Selection is configuration-driven:
@@ -230,3 +274,8 @@ response caching, audit logging, pagination, the typed data endpoints), the
 Alembic migration graph, the end-to-end pipeline on a real SQLite database
 (seeding → backfill → signals → recommendations → tracking → notifications →
 closure) and the CLI. Run `make test`.
+
+The Phase-8 dashboard has its own suite (28 Vitest tests over the API client,
+formatters, screener table and pagination) plus a strict `tsc` typecheck and a
+production `next build`. Run `make web-test`, `make web-typecheck` and
+`make web-build`.
