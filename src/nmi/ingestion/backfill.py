@@ -381,27 +381,32 @@ def _issue_weight(report: ValidationReport) -> int:
 def resolve_members(
     session: Session,
     index_codes: Sequence[str],
-    start: date,
-    end: date,
+    start: date | None,
+    end: date | None,
 ) -> list[Instrument]:
     """Instruments that were index members at any point within [start, end].
 
-    Membership intersections are interval-based → an instrument that left a
-    midcap index months ago is still resolvable for its prior months, which is
+    Either bound may be ``None`` to mean "unbounded on that side", so a backfill
+    with no explicit window resolves every member that ever belonged to the
+    index. Membership intersections are interval-based → an instrument that left
+    a midcap index months ago is still resolvable for its prior months, which is
     what eliminates survivorship bias in later backtests.
     """
-    overlap = and_(
-        IndexMembership.effective_from <= end,
-        or_(
-            IndexMembership.effective_to.is_(None),
-            IndexMembership.effective_to >= start,
-        ),
-    )
+    conditions = [Index.code.in_(index_codes)]
+    if end is not None:
+        conditions.append(IndexMembership.effective_from <= end)
+    if start is not None:
+        conditions.append(
+            or_(
+                IndexMembership.effective_to.is_(None),
+                IndexMembership.effective_to >= start,
+            )
+        )
     stmt = (
         select(Instrument)
         .join(IndexMembership, IndexMembership.instrument_id == Instrument.id)
         .join(Index, Index.id == IndexMembership.index_id)
-        .where(Index.code.in_(index_codes), overlap)
+        .where(and_(*conditions))
         .order_by(Instrument.symbol)
     )
     return list(session.scalars(stmt).unique().all())

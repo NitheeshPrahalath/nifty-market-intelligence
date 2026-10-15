@@ -1313,7 +1313,7 @@ class RecommendationEvent(Base):
             values_callable=lambda e: [x.value for x in e],
         )
     )
-    title: Mapped[str] = mapped_column(String(128), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     recommendation_version: Mapped[int | None] = mapped_column(Integer)

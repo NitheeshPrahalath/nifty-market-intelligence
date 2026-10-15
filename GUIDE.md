@@ -157,6 +157,10 @@ make web-build && npm --prefix apps/web run start
 
 ## Troubleshooting
 
+- **`bind: address already in use` when starting the DB** — you already have a
+  Postgres running on port 5432 (or another process). Set `DB_PORT=5433` in
+  `.env` and change the port in `DATABASE_URL` to match, then re-run
+  `make db-up`.
 - **`connection refused` on the API** — run `make db-up`, then check
   `DATABASE_URL` in `.env` matches the Docker credentials.
 - **Empty pages in the dashboard** — the pipeline has not been run for the

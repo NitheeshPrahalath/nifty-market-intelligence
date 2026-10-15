@@ -7,7 +7,9 @@ services:
       POSTGRES_PASSWORD: nmi
       POSTGRES_DB: nmi
     ports:
-      - "5432:5432"
+      # Host port is configurable via DB_PORT (set in .env) so the container can
+      # coexist with a locally installed Postgres already bound to 5432.
+      - "${DB_PORT:-5432}:5432"
     volumes:
       - nmi_pgdata:/var/lib/postgresql/data
     healthcheck:

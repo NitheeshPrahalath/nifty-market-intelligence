@@ -395,11 +395,21 @@ def upsert_cash_flows(
 # ---------------------------------------------------------------------------
 
 def _clean_value(v):
-    """Map float NaN/Inf to None so Numeric columns stay valid on Postgres."""
+    """Map float NaN/Inf to None and numpy scalars to native Python.
+
+    psycopg2 adapts values by exact ``type``, so a ``numpy.float64``/``int64``/
+    ``bool_`` is not recognised as a float/int/bool and is sent as its ``repr``
+    (e.g. ``np.float64(...)``), which Postgres rejects. Indicators compute with
+    numpy arrays, so every value is normalised here before it reaches a column.
+    """
     if v is None:
         return None
     import math
 
+    import numpy as np
+
+    if isinstance(v, np.generic):
+        v = v.item()
     if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
         return None
     return v

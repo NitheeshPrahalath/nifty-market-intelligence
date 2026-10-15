@@ -72,3 +72,15 @@ def test_resolve_members_overlaps_interval(sqlite_session, pointed_at_fixtures):
         sqlite_session, ["NIFTY_50"], date(2024, 6, 1), date(2024, 6, 30)
     )
     assert {i.symbol for i in nifty50} == {"RELIANCE", "TCS", "INFY"}
+
+
+def test_resolve_members_unbounded_window(sqlite_session, pointed_at_fixtures):
+    """A backfill with no explicit window resolves every historical member."""
+    svc = IngestionService(sqlite_session)
+    svc.seed_universe()
+
+    everyone = resolve_members(sqlite_session, ["NIFTY_MIDCAP_150"], None, None)
+    assert {i.symbol for i in everyone} == {"TORNTPOWER"}
+
+    open_ended = resolve_members(sqlite_session, ["NIFTY_50"], None, None)
+    assert {i.symbol for i in open_ended} == {"RELIANCE", "TCS", "INFY"}
