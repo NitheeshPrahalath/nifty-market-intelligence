@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PHASE_6_REVISION = "a4c7e2b18d93"
 PHASE_7_REVISION = "e7b3c1a9f204"
 PHASE_9_REVISION = "f9a2c4e6b8d0"
+PHASE_10_REVISION = "b1d2e3f4a5c6"
 
 
 def _alembic_config(db_url: str) -> Config:
@@ -115,6 +116,8 @@ def test_the_phase_7_api_audit_table_is_created_and_dropped(migrated_db):
         "id",
         "requested_at",
         "principal",
+        "role",
+        "request_id",
         "method",
         "path",
         "query",
@@ -170,3 +173,52 @@ def test_the_phase_9_explanations_table_is_created_and_dropped(migrated_db):
     command.upgrade(config, PHASE_9_REVISION)
     after_up = set(inspect(create_engine(migrated_db)).get_table_names())
     assert "explanations" in after_up
+
+
+def test_the_phase_10_quality_tables_and_audit_columns(migrated_db):
+    config = _alembic_config(migrated_db)
+    command.upgrade(config, PHASE_10_REVISION)
+    inspector = inspect(create_engine(migrated_db))
+    tables = set(inspector.get_table_names())
+    assert "data_quality_runs" in tables
+    assert "data_quality_issues" in tables
+
+    assert set(_columns(inspector, "data_quality_runs")) == {
+        "id",
+        "job_name",
+        "status",
+        "as_of",
+        "started_at",
+        "finished_at",
+        "checks_run",
+        "checks_failed",
+        "summary",
+        "config",
+        "created_at",
+        "updated_at",
+    }
+    assert set(_columns(inspector, "data_quality_issues")) == {
+        "id",
+        "run_id",
+        "check_code",
+        "severity",
+        "scope",
+        "message",
+        "details",
+        "created_at",
+    }
+    # The audit log gained the correlation + RBAC columns.
+    api_columns = set(_columns(inspector, "api_requests"))
+    assert {"role", "request_id"} <= api_columns
+
+    command.downgrade(config, PHASE_9_REVISION)
+    after_down = inspect(create_engine(migrated_db))
+    down_tables = set(after_down.get_table_names())
+    assert "data_quality_runs" not in down_tables
+    assert "data_quality_issues" not in down_tables
+    assert "api_requests" in down_tables  # the Phase-7 table survives
+    assert "role" not in set(_columns(after_down, "api_requests"))
+
+    command.upgrade(config, "head")
+    after_up = set(inspect(create_engine(migrated_db)).get_table_names())
+    assert "data_quality_runs" in after_up

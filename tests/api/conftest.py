@@ -62,15 +62,18 @@ def make_client(api_engine, monkeypatch):
         *,
         auth: bool = False,
         keys: tuple[str, ...] = (),
+        roles: dict[str, str] | None = None,
         limit: int = 0,
         ttl: int = 60,
         audit: bool = True,
     ) -> TestClient:
         monkeypatch.setattr(settings, "api_auth_enabled", auth)
         monkeypatch.setattr(settings, "api_keys", list(keys))
+        monkeypatch.setattr(settings, "api_key_roles", dict(roles or {}))
         monkeypatch.setattr(settings, "api_rate_limit_per_minute", limit)
         monkeypatch.setattr(settings, "api_cache_ttl_seconds", ttl)
         monkeypatch.setattr(settings, "api_audit_enabled", audit)
+        monkeypatch.setattr(settings, "security_headers_enabled", True)
         app = create_app(
             cache=ResponseCache(store=MemoryStore(), ttl=ttl),
             limiter=RateLimiter(store=MemoryStore(), limit_per_minute=limit),

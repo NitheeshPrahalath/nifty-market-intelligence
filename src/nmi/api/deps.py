@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from sqlalchemy.orm import Session
 
 from nmi.core.db import get_session
@@ -51,5 +51,24 @@ def get_principal(request: Request) -> str:
     return getattr(request.state, "principal", "anonymous")
 
 
+def get_role(request: Request) -> str:
+    return getattr(request.state, "role", "viewer")
+
+
 def get_request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "")
+
+
+def require_scope(scope: str) -> Callable[[Request], None]:
+    """A dependency that enforces a role scope on a route.
+
+    Authentication (401) is the gateway middleware's job; this is authorization
+    (403) — a valid key that lacks ``scope`` is refused before the handler runs.
+    """
+
+    def dependency(request: Request) -> None:
+        scopes: frozenset[str] = getattr(request.state, "scopes", frozenset())
+        if scope not in scopes:
+            raise HTTPException(status_code=403, detail=f"missing required scope: {scope}")
+
+    return dependency

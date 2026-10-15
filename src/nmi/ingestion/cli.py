@@ -541,13 +541,15 @@ def serve(
     """Run the read-only HTTP API with uvicorn.
 
     Docs are served at ``/docs``; every endpoint lives under ``/api/v1`` except
-    ``/health``. Auth, rate limiting and caching are configured via ``API_*``
-    environment variables (see ``.env.example``).
+    ``/health``. Auth, rate limiting, caching and RBAC are configured via ``API_*``
+    environment variables; logs are structured JSON when ``LOG_FORMAT=json`` and
+    metrics are exposed at ``/metrics`` (see ``.env.example``).
     """
     import os
 
     import uvicorn
 
+    setup_logging()
     if db_url:
         # Also export it so a ``--reload`` child process constructs the same engine.
         os.environ["DATABASE_URL"] = db_url
@@ -629,6 +631,53 @@ def explain(
         )
         typer.echo(f"    {explanation.summary}")
     typer.secho(f"wrote {written} {kind} explanation(s)", fg=typer.colors.GREEN)
+
+
+@app.command()
+def quality_report(
+    index: str | None = typer.Option(None, "--index", help="Comma-separated index codes"),
+    as_of: str | None = typer.Option(None, "--as-of", help="Reconcile as of this date"),
+    lookback_days: int | None = typer.Option(None, "--lookback-days"),
+    stale_business_days: int | None = typer.Option(None, "--stale-business-days"),
+    db_url: str | None = typer.Option(None, "--db-url"),
+):
+    """Reconcile stored market data and record the findings.
+
+    Runs every check in ``nmi.quality.checks`` against the stored price history,
+    persists the run, and exits non-zero when any ERROR-level issue is found so a
+    scheduler can alert on it.
+    """
+    from nmi.quality import QualityService
+
+    index_codes = (
+        [c.strip() for c in index.split(",") if c.strip()] if index else None
+    )
+    with _sessionctx(db_url) as session:
+        result = QualityService(session).reconcile(
+            index_codes,
+            as_of=_cli_date(as_of) if as_of else None,
+            lookback_days=lookback_days,
+            stale_business_days=stale_business_days,
+        )
+    typer.secho(
+        f"quality run {result.run_id}: {len(result.errors)} error(s), "
+        f"{len(result.warnings)} warning(s)",
+        fg=typer.colors.GREEN if result.ok else typer.colors.YELLOW,
+    )
+    typer.echo(
+        f"  as_of={result.as_of} checks_run={result.checks_run} "
+        f"checks_failed={result.checks_failed} issues={len(result.issues)}"
+    )
+    for issue in result.errors[:20]:
+        typer.secho(f"  ERROR  {issue.check_code} {issue.scope or '-'}: {issue.message}",
+                    fg=typer.colors.RED)
+    for issue in result.warnings[:20]:
+        typer.secho(f"  WARN   {issue.check_code} {issue.scope or '-'}: {issue.message}",
+                    fg=typer.colors.YELLOW)
+    if result.truncated:
+        typer.secho(f"  ({result.truncated} more issue(s) not shown)", fg=typer.colors.YELLOW)
+    if not result.ok:
+        raise typer.Exit(code=1)
 
 
 def _echo_backtest_trades(trades) -> None:

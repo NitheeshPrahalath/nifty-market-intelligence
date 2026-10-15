@@ -1128,6 +1128,7 @@ def list_audit(
     path: str | None,
     status_code: int | None,
     since: date | None,
+    request_id: str | None = None,
     offset: int,
     limit: int,
 ) -> tuple[list[AuditEntryView], int]:
@@ -1142,6 +1143,8 @@ def list_audit(
         conditions.append(ApiRequest.status_code == status_code)
     if since:
         conditions.append(func.date(ApiRequest.requested_at) >= since)
+    if request_id:
+        conditions.append(ApiRequest.request_id == request_id)
 
     total = session.scalar(select(func.count()).select_from(ApiRequest).where(*conditions)) or 0
     stmt = (
@@ -1156,6 +1159,8 @@ def list_audit(
             id=row.id,
             requested_at=row.requested_at,
             principal=row.principal,
+            role=row.role,
+            request_id=row.request_id,
             method=row.method,
             path=row.path,
             query=row.query,

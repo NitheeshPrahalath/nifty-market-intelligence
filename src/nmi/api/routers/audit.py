@@ -21,6 +21,9 @@ def list_audit(
     principal: Annotated[str | None, Query(description="Filter by authenticated key label")] = None,
     path: Annotated[str | None, Query(description="Substring match on the request path")] = None,
     status_code: Annotated[int | None, Query(ge=100, le=599)] = None,
+    request_id: Annotated[
+        str | None, Query(description="Correlate with the X-Request-Id header")
+    ] = None,
     since: Annotated[date | None, Query()] = None,
     page: Annotated[Page, Depends(get_page)] = None,  # type: ignore[assignment]
     db: Annotated[Session, Depends(get_db)] = None,  # type: ignore[assignment]
@@ -32,6 +35,7 @@ def list_audit(
         path=path,
         status_code=status_code,
         since=since,
+        request_id=request_id,
         offset=page.offset,
         limit=page.limit,
     )

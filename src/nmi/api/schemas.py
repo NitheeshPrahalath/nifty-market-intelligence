@@ -403,6 +403,8 @@ class AuditEntryView(BaseModel):
     id: int
     requested_at: datetime
     principal: str
+    role: str | None = None
+    request_id: str | None = None
     method: str
     path: str
     query: str | None = None
@@ -410,3 +412,36 @@ class AuditEntryView(BaseModel):
     duration_ms: float
     cache_hit: bool
     client_ip: str | None = None
+
+
+class QualityIssueView(BaseModel):
+    id: int
+    check_code: str
+    severity: str
+    scope: str | None = None
+    message: str
+    details: dict | None = None
+
+
+class QualityRunView(BaseModel):
+    run_id: int
+    job_name: str
+    status: str
+    as_of: date | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    checks_run: int
+    checks_failed: int
+    summary: str | None = None
+    config: dict | None = None
+    issue_count: int = 0
+    error_count: int = 0
+    warning_count: int = 0
+    issues: list[QualityIssueView] = Field(default_factory=list)
+
+
+class QualityReport(BaseModel):
+    """Latest reconciliation run, or ``None`` when one has never executed."""
+
+    available: bool
+    run: QualityRunView | None = None

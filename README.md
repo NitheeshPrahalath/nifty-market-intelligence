@@ -311,7 +311,8 @@ backtester (as-of dataset, event-driven fills, costs, sizing, exit handling, the
 metric suite, walk-forward), the Phase-7 API (auth on/off, rate limiting,
 response caching, audit logging, pagination, the typed data endpoints), the
 Phase-9 explanation layer (fact sheets, citation validation, providers, caching
-and fallback, the explanation endpoint), the Alembic migration graph, the
+and fallback, the explanation endpoint), the Phase-10 observability, RBAC,
+security headers, data-quality reconciliation and Alembic migration graph, the
 end-to-end pipeline on a real SQLite database (seeding → backfill → signals →
 recommendations → tracking → notifications → explanations → closure) and the CLI.
 Run `make test`.

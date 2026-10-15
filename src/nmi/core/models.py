@@ -1601,6 +1601,8 @@ class ApiRequest(Base):
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
     principal: Mapped[str] = mapped_column(String(64), nullable=False, default="anonymous")
+    role: Mapped[str | None] = mapped_column(String(16))
+    request_id: Mapped[str | None] = mapped_column(String(16))
     method: Mapped[str] = mapped_column(String(8), nullable=False)
     path: Mapped[str] = mapped_column(String(256), nullable=False)
     query: Mapped[str | None] = mapped_column(String(512))
@@ -1660,4 +1662,66 @@ class Explanation(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class DataQualityRun(Base):
+    """One reconciliation pass over stored market data (Phase 10).
+
+    Mirrors the ``ingestion_runs`` audit convention: a reconciliation job opens a
+    row, runs every check, and records the findings as ``data_quality_issues`` so
+    a bad batch of prices can be traced without re-running the pipeline.
+    """
+
+    __tablename__ = "data_quality_runs"
+    __table_args__ = (
+        SqlIndex("ix_data_quality_run_as_of", "as_of"),
+        SqlIndex("ix_data_quality_run_job", "job_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[RunStatus] = mapped_column(
+        Enum(RunStatus, native_enum=False, values_callable=lambda e: [x.value for x in e]),
+        default=RunStatus.PENDING,
+        nullable=False,
+    )
+    as_of: Mapped[date | None] = mapped_column(Date)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    checks_run: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    checks_failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    config: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class DataQualityIssue(Base):
+    """One reconciliation finding within a :class:`DataQualityRun`."""
+
+    __tablename__ = "data_quality_issues"
+    __table_args__ = (
+        SqlIndex("ix_data_quality_issue_run", "run_id"),
+        SqlIndex("ix_data_quality_issue_code", "check_code"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("data_quality_runs.id"), nullable=False)
+    check_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[Severity] = mapped_column(
+        Enum(Severity, native_enum=False, values_callable=lambda e: [x.value for x in e]),
+        nullable=False,
+    )
+    scope: Mapped[str | None] = mapped_column(String(64))
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
     )
