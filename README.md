@@ -42,6 +42,9 @@ data/                    # (git-ignored) raw/processed data, sample files in tes
 
 ## Quickstart
 
+New here? See **[GUIDE.md](GUIDE.md)** for a step-by-step, user-facing
+walkthrough (install → data → API → dashboard → troubleshooting).
+
 ```bash
 make install           # create .venv (Python 3.11) and install -e ".[dev]"
 make test              # run the test suite
