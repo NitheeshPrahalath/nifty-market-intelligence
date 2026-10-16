@@ -155,6 +155,9 @@ def _run_metrics(job: str, db_url: str | None, index: str, start: str | None, en
 @app.command()
 def backfill_index_prices(
     index: str = typer.Option(..., "--index", help="Comma-separated benchmark index codes"),
+    start: str | None = typer.Option(None, "--start", help="First session (YYYY-MM-DD)"),
+    end: str | None = typer.Option(None, "--end", help="Last session (YYYY-MM-DD)"),
+    provider: str | None = typer.Option(None, "--provider", help="csv|nse"),
     db_url: str | None = typer.Option(None, "--db-url"),
 ):
     """Load index close series (benchmarks for relative strength)."""
@@ -162,7 +165,12 @@ def backfill_index_prices(
 
     index_codes = [c.strip() for c in index.split(",") if c.strip()]
     with _sessionctx(db_url) as session:
-        result = MetricsService(session).backfill_index_prices(index_codes)
+        result = MetricsService(session).backfill_index_prices(
+            index_codes,
+            _cli_date(start) if start else None,
+            _cli_date(end) if end else None,
+            provider_name=provider,
+        )
     typer.echo(result.as_dict())
 
 

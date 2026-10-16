@@ -194,22 +194,47 @@ def _triggers_from_detail(detail: Sequence | None) -> list[ExitTrigger]:
     ]
 
 
+def _index_price_provider(provider_name: str | None):
+    """Build the configured index-price provider, honouring a per-run override."""
+    if provider_name is None:
+        return index_price_provider()
+    previous = settings.index_price_provider
+    settings.index_price_provider = provider_name
+    try:
+        return index_price_provider()
+    finally:
+        settings.index_price_provider = previous
+
+
 class MetricsService:
     def __init__(self, session: Session):
         self.session = session
         self.calc_version = settings.calc_version
 
     # ------------------------------------------------------------ benchmarks
-    def backfill_index_prices(self, index_codes: Sequence[str]) -> JobResult:
-        provider = index_price_provider()
-        run = self._start_run("backfill_index_prices", {"source": provider.name})
+    def backfill_index_prices(
+        self,
+        index_codes: Sequence[str],
+        start: date | None = None,
+        end: date | None = None,
+        provider_name: str | None = None,
+    ) -> JobResult:
+        provider = _index_price_provider(provider_name)
+        run = self._start_run(
+            "backfill_index_prices",
+            {
+                "source": provider.name,
+                "start": start.isoformat() if start else None,
+                "end": end.isoformat() if end else None,
+            },
+        )
         result = JobResult(
             run_id=run.id, job_name="backfill_index_prices", status=RunStatus.RUNNING
         )
         try:
             for code in index_codes:
                 index_id = store.ensure_indices(self.session, [code]).get(code)
-                records = provider.fetch_index_prices(code)
+                records = provider.fetch_index_prices(code, start, end)
                 rows = [r.model_dump() for r in records]
                 stored = store.upsert_index_prices(
                     self.session,

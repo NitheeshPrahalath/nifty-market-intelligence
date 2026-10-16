@@ -16,6 +16,7 @@ from nmi.ingestion.records import (
     CorporateActionRecord,
     IncomeStatementRecord,
     IndexMembershipRecord,
+    IndexPriceRecord,
     UniverseRow,
 )
 
@@ -48,6 +49,17 @@ class MembershipProvider(Protocol):
     def fetch_membership(
         self, index_codes: Sequence[str] | None = None
     ) -> list[IndexMembershipRecord]: ...
+
+
+class IndexPriceProvider(Protocol):
+    name: str
+
+    def fetch_index_prices(
+        self,
+        index_code: str,
+        start: date | None = None,
+        end: date | None = None,
+    ) -> list[IndexPriceRecord]: ...
 
 
 class CorporateActionProvider(Protocol):
@@ -109,6 +121,14 @@ def get_provider(family: str) -> object:
         from nmi.ingestion.providers.yahoo_provider import YahooUniverseProvider
 
         return YahooUniverseProvider()
+    if provider_name == "nse" and family == "price":
+        from nmi.ingestion.providers.nse_provider import NSEBhavcopyPriceProvider
+
+        return NSEBhavcopyPriceProvider()
+    if provider_name == "nse" and family == "index_price":
+        from nmi.ingestion.providers.nse_provider import NSEIndexPriceProvider
+
+        return NSEIndexPriceProvider()
     raise ValueError(f"Unknown provider '{provider_name}' for family '{family}'")
 
 
@@ -132,5 +152,5 @@ def universe_provider() -> UniverseProvider:
     return get_provider("universe")  # type: ignore[return-value]
 
 
-def index_price_provider() -> object:
-    return get_provider("index_price")
+def index_price_provider() -> IndexPriceProvider:
+    return get_provider("index_price")  # type: ignore[return-value]

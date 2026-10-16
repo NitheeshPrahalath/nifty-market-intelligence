@@ -143,6 +143,49 @@ For a production build instead of the dev server:
 make web-build && npm --prefix apps/web run start
 ```
 
+## 6. Using free live data from NSE (no subscription)
+
+The bundled sample data is fine for trying things out. For real, current data
+you do **not** need to pay for anything: NSE publishes its end-of-day files
+freely, and the platform can read them directly.
+
+Point the providers at the `nse` adapters in `.env`:
+
+```
+PRICE_PROVIDER=nse
+INDEX_PRICE_PROVIDER=nse
+BHAVCOPY_DIR=./data/raw/bhavcopy
+INDEX_CLOSE_DIR=./data/raw/index_close
+```
+
+Then load prices and benchmark indices for a date range:
+
+```bash
+.venv/bin/nmi seed-universe --membership-file data/raw/memberships/index_memberships.csv
+.venv/bin/nmi backfill-prices --index NIFTY_50 \
+    --provider nse --start 2024-06-01 --end 2024-06-28
+.venv/bin/nmi backfill-index-prices --index NIFTY_50 \
+    --provider nse --start 2024-06-01 --end 2024-06-28
+```
+
+For a one-command pipeline across Nifty 50, Midcap 150 and Smallcap 250, run
+`scripts/live_data.sh` (override the range with `START=` / `END=`).
+
+What it uses:
+
+- **Prices** — NSE's daily **bhavcopy** (UDiFF `BhavCopy_NSE_CM_…csv.zip`, or the
+  older `cm…bhav.csv.zip` / `sec_bhavdata_full_…csv`).
+- **Benchmarks** — NSE's `ind_close_all_DDMMYYYY.csv` (every index's OHLC).
+
+Files are downloaded once, written to `BHAVCOPY_DIR` / `INDEX_CLOSE_DIR`, and
+read from there on later runs — so a backfill is repeatable offline. Any day
+with no file (weekends/holidays) is simply skipped. If your `NIFTY_*` code is
+not in the built-in name map, add it to `INDEX_NAME_MAP` in `.env`.
+
+> Reference data — index membership (which stocks are in each index, with
+> effective dates) and fundamentals — still comes from CSV. NSE's bhavcopy does
+> not carry that.
+
 ## Everyday commands
 
 | Task | Command |

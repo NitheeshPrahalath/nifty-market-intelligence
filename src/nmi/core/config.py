@@ -40,6 +40,18 @@ class Settings(BaseSettings):
     fundamentals_dir: Path = Field(default=Path("./data/raw/fundamentals"))
     indexes_dir: Path = Field(default=Path("./data/raw/indexes"))
 
+    # Official NSE end-of-day file feeds (the free "nse" provider family). A
+    # per-session file is read from these directories when present and
+    # downloaded (and cached back here) when it is missing.
+    bhavcopy_dir: Path = Field(default=Path("./data/raw/bhavcopy"))
+    index_close_dir: Path = Field(default=Path("./data/raw/index_close"))
+    nse_http_timeout_seconds: float = 30.0
+    # Politeness delay between consecutive live downloads (0 = no delay).
+    nse_download_sleep_seconds: float = 0.0
+    # Optional override from platform index code (e.g. "NIFTY_50") to the exact
+    # "Index Name" NSE uses in its ind_close_all files (e.g. "Nifty 50").
+    index_name_map: dict[str, str] = Field(default_factory=dict)
+
     # Metrics engine (Phase 2) tuning.
     calc_version: str = "v1"
     rs_benchmarks: list[str] = ["NIFTY_50"]

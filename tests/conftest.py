@@ -51,6 +51,11 @@ def pointed_at_fixtures():
         "corporate_actions_dir": settings.corporate_actions_dir,
         "fundamentals_dir": settings.fundamentals_dir,
         "indexes_dir": settings.indexes_dir,
+        "price_provider": settings.price_provider,
+        "fundamental_provider": settings.fundamental_provider,
+        "corporate_action_provider": settings.corporate_action_provider,
+        "index_membership_provider": settings.index_membership_provider,
+        "index_price_provider": settings.index_price_provider,
     }
     settings.data_dir = FIXTURES
     settings.prices_dir = FIXTURES / "prices"
@@ -58,6 +63,11 @@ def pointed_at_fixtures():
     settings.corporate_actions_dir = FIXTURES / "corporate_actions"
     settings.fundamentals_dir = FIXTURES / "fundamentals"
     settings.indexes_dir = FIXTURES / "indexes"
+    settings.price_provider = "csv"
+    settings.fundamental_provider = "csv"
+    settings.corporate_action_provider = "csv"
+    settings.index_membership_provider = "csv"
+    settings.index_price_provider = "csv"
     try:
         yield settings
     finally:
@@ -67,6 +77,11 @@ def pointed_at_fixtures():
         settings.corporate_actions_dir = original["corporate_actions_dir"]
         settings.fundamentals_dir = original["fundamentals_dir"]
         settings.indexes_dir = original["indexes_dir"]
+        settings.price_provider = original["price_provider"]
+        settings.fundamental_provider = original["fundamental_provider"]
+        settings.corporate_action_provider = original["corporate_action_provider"]
+        settings.index_membership_provider = original["index_membership_provider"]
+        settings.index_price_provider = original["index_price_provider"]
 
 
 @pytest.fixture()

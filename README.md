@@ -298,11 +298,17 @@ Selection is configuration-driven:
 
 | Family              | Setting                        | Adapters        |
 |---------------------|--------------------------------|-----------------|
-| prices              | `PRICE_PROVIDER`               | csv, yahoo      |
+| prices              | `PRICE_PROVIDER`               | csv, nse, yahoo |
+| index prices        | `INDEX_PRICE_PROVIDER`         | csv, nse        |
 | corporate actions   | `CORPORATE_ACTION_PROVIDER`    | csv             |
 | index membership    | `INDEX_MEMBERSHIP_PROVIDER`    | csv             |
 | fundamentals        | `FUNDAMENTAL_PROVIDER`         | csv             |
 | AI explanations     | `EXPLAIN_PROVIDER`             | template, openai |
+
+The `nse` adapters read free official NSE end-of-day files: stock prices from
+the daily bhavcopy and benchmark closes from `ind_close_all_*.csv`. See
+`GUIDE.md` for the live-data walkthrough and `scripts/live_data.sh` for a
+ready-to-run Nifty 50 / Midcap 150 / Smallcap 250 pipeline.
 
 ## Tests
 
